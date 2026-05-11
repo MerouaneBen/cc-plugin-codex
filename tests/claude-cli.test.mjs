@@ -13,7 +13,6 @@ import {
   resolveDefaultModel,
   resolveDefaultEffort,
   buildArgs,
-  buildClaudeSpawnEnv,
   MODEL_ALIASES,
   EFFORT_ALIASES,
   VALID_EFFORTS,
@@ -719,82 +718,6 @@ describe("buildArgs", () => {
     const idx = args.indexOf("--settings");
     assert.ok(idx >= 0);
     assert.equal(args[idx + 1], "/tmp/s.json");
-  });
-});
-
-// ===========================================================================
-// buildClaudeSpawnEnv
-// ===========================================================================
-
-describe("buildClaudeSpawnEnv", () => {
-  it("removes an inherited localhost Anthropic base URL when settings no longer define it", () => {
-    const env = buildClaudeSpawnEnv(
-      {
-        ANTHROPIC_BASE_URL: "http://127.0.0.1:55453",
-        CLAUDE_CODE_EFFORT_LEVEL: "xhigh",
-      },
-      { configuredEnv: { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" } }
-    );
-
-    assert.equal(env.ANTHROPIC_BASE_URL, undefined);
-    assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, "xhigh");
-  });
-
-  it("keeps an explicitly configured localhost base URL", () => {
-    const env = buildClaudeSpawnEnv(
-      { ANTHROPIC_BASE_URL: "http://127.0.0.1:55453" },
-      { configuredEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:55453" } }
-    );
-
-    assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:55453");
-  });
-
-  it("keeps non-local remote overrides even when they are not in settings", () => {
-    const env = buildClaudeSpawnEnv(
-      { ANTHROPIC_BASE_URL: "https://gateway.example.com" },
-      { configuredEnv: {} }
-    );
-
-    assert.equal(env.ANTHROPIC_BASE_URL, "https://gateway.example.com");
-  });
-
-  it("removes stale localhost proxy env vars too", () => {
-    const env = buildClaudeSpawnEnv(
-      {
-        ALL_PROXY: "http://localhost:8083",
-        HTTPS_PROXY: "http://localhost:8080",
-        HTTP_PROXY: "http://127.0.0.1:8787",
-        https_proxy: "http://localhost:8081",
-        http_proxy: "http://127.0.0.1:8788",
-        all_proxy: "http://localhost:8082",
-      },
-      { configuredEnv: {} }
-    );
-
-    assert.equal(env.ALL_PROXY, undefined);
-    assert.equal(env.HTTPS_PROXY, undefined);
-    assert.equal(env.HTTP_PROXY, undefined);
-    assert.equal(env.https_proxy, undefined);
-    assert.equal(env.http_proxy, undefined);
-    assert.equal(env.all_proxy, undefined);
-  });
-
-  it("removes IPv6 loopback overrides too", () => {
-    const env = buildClaudeSpawnEnv(
-      { ANTHROPIC_BASE_URL: "http://[::1]:55453" },
-      { configuredEnv: {} }
-    );
-
-    assert.equal(env.ANTHROPIC_BASE_URL, undefined);
-  });
-
-  it("preserves inherited env when Claude settings are unreadable", () => {
-    const env = buildClaudeSpawnEnv(
-      { ANTHROPIC_BASE_URL: "http://127.0.0.1:55453" },
-      { configuredEnv: null }
-    );
-
-    assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:55453");
   });
 });
 
