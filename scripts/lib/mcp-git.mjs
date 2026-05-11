@@ -50,6 +50,12 @@ function ensureValidRef(ref, label = "ref") {
   if (!REF_PATTERN.test(ref)) {
     throw new Error(`${label} contains characters that are not allowed`);
   }
+  // A leading `-` would be interpreted by git as an option (e.g., `-p`,
+  // `--ext-diff`) rather than a ref. Reject explicitly even though `--` follows
+  // ref tokens elsewhere, since refs are emitted *before* the `--` separator.
+  if (ref.startsWith("-")) {
+    throw new Error(`${label} may not start with '-' (interpreted as flag): ${ref}`);
+  }
   return ref;
 }
 
@@ -502,7 +508,18 @@ export async function runMcpGitServer({
           continue;
         }
         const response = handleMcpRequest(request, root);
-        if (response && request.id !== undefined && request.id !== null) {
+        if (!response) {
+          continue;
+        }
+        // Error responses (including -32600 for non-object payloads) must always
+        // be emitted, even when the request has no `id`; otherwise the caller has
+        // no signal that the framing was wrong. Result responses only flow back
+        // when the request had an id (i.e., was a request, not a notification).
+        const hasRequestId =
+          isPlainObject(request) &&
+          request.id !== undefined &&
+          request.id !== null;
+        if (response.error || hasRequestId) {
           writeResponse(response);
         }
       }

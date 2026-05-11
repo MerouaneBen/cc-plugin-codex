@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  createReviewIsolation,
   createReviewWorktree,
   pruneStaleReviewWorktrees,
   resolveBaseRef,
@@ -143,6 +144,51 @@ describe("createReviewWorktree", () => {
     } finally {
       a.cleanup();
       b.cleanup();
+    }
+  });
+});
+
+describe("createReviewIsolation", () => {
+  it("returns the original repoRoot for working-tree mode (no worktree)", () => {
+    const iso = createReviewIsolation(repoRoot, { mode: "working-tree", label: "wt" });
+    try {
+      assert.equal(iso.cwd, repoRoot);
+      assert.equal(iso.gitRoot, repoRoot);
+      assert.equal(iso.isolated, false);
+    } finally {
+      iso.cleanup();
+    }
+  });
+
+  it("does not create a worktree directory for working-tree mode", () => {
+    const root = path.join(
+      process.env.CODEX_HOME,
+      "plugins", "data", "cc", "runtime", "review-worktrees"
+    );
+    const countEntries = () => {
+      try {
+        return fs.readdirSync(root, { withFileTypes: true }).length;
+      } catch {
+        return 0;
+      }
+    };
+    const before = countEntries();
+    const iso = createReviewIsolation(repoRoot, { mode: "working-tree" });
+    const after = countEntries();
+    assert.equal(after, before);
+    iso.cleanup();
+  });
+
+  it("creates and cleans up an ephemeral worktree for branch mode", () => {
+    const iso = createReviewIsolation(repoRoot, { mode: "branch" }, { label: "iso-branch" });
+    try {
+      assert.notEqual(iso.cwd, repoRoot);
+      assert.equal(iso.gitRoot, iso.cwd);
+      assert.equal(iso.isolated, true);
+      assert.ok(fs.existsSync(iso.cwd));
+    } finally {
+      iso.cleanup();
+      assert.equal(fs.existsSync(iso.cwd), false);
     }
   });
 });

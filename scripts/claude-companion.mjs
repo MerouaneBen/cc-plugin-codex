@@ -46,9 +46,11 @@ import {
   cleanupSandboxSettings,
   createReviewMcpConfig,
   cleanupReviewMcpConfig,
+  pruneStaleSandboxSettings,
+  pruneStaleReviewMcpConfigs,
 } from "./lib/claude-cli.mjs";
 import {
-  createReviewWorktree,
+  createReviewIsolation,
   pruneStaleReviewWorktrees,
 } from "./lib/review-worktree.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
@@ -472,8 +474,10 @@ async function executeReviewRun(request) {
   ensureClaudeReady(request.cwd);
   ensureGitRepository(request.cwd);
 
-  // Sweep dead worktrees from previous crashed runs before allocating a new one.
+  // Sweep dead resources from previous crashed runs before allocating new ones.
   try { pruneStaleReviewWorktrees(request.cwd); } catch {}
+  try { pruneStaleSandboxSettings(); } catch {}
+  try { pruneStaleReviewMcpConfigs(); } catch {}
 
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
@@ -489,11 +493,11 @@ async function executeReviewRun(request) {
     let result;
     const sandboxSettingsFile = createSandboxSettings("read-only");
     try {
-      const worktree = createReviewWorktree(request.cwd, { label: "review" });
+      const isolation = createReviewIsolation(request.cwd, target, { label: "review" });
       try {
-        const mcpConfigFile = createReviewMcpConfig(worktree.path);
+        const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
         try {
-          result = await runClaudeReview(worktree.path, prompt, {
+          result = await runClaudeReview(isolation.cwd, prompt, {
             model: request.model,
             effort: request.effort,
             onProgress: request.onProgress,
@@ -507,7 +511,7 @@ async function executeReviewRun(request) {
           cleanupReviewMcpConfig(mcpConfigFile);
         }
       } finally {
-        worktree.cleanup();
+        isolation.cleanup();
       }
     } finally {
       cleanupSandboxSettings(sandboxSettingsFile);
@@ -556,12 +560,14 @@ async function executeReviewRun(request) {
   let result;
   const sandboxSettingsFile = createSandboxSettings("read-only");
   try {
-    const worktree = createReviewWorktree(context.repoRoot, { label: "adversarial-review" });
+    const isolation = createReviewIsolation(context.repoRoot, target, {
+      label: "adversarial-review",
+    });
     try {
-      const mcpConfigFile = createReviewMcpConfig(worktree.path);
+      const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
       try {
         result = await runClaudeAdversarialReview(
-          worktree.path,
+          isolation.cwd,
           prompt,
           schema,
           {
@@ -579,7 +585,7 @@ async function executeReviewRun(request) {
         cleanupReviewMcpConfig(mcpConfigFile);
       }
     } finally {
-      worktree.cleanup();
+      isolation.cleanup();
     }
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);

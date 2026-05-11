@@ -598,6 +598,56 @@ export function cleanupReviewMcpConfig(filePath) {
 }
 
 // ---------------------------------------------------------------------------
+// Stale tmp sweepers — reclaim files left behind by SIGKILL/crashes.
+// ---------------------------------------------------------------------------
+
+function pruneStaleTempFiles(subdir, options = {}) {
+  const prefix = options.prefix;
+  const maxAgeMs = options.maxAgeMs ?? 6 * 60 * 60 * 1000;
+  const dir = path.join(resolvePluginRuntimeRoot(), subdir);
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (prefix && !entry.name.startsWith(prefix)) continue;
+    const full = path.join(dir, entry.name);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (now - stat.mtimeMs < maxAgeMs) continue;
+    try {
+      fs.unlinkSync(full);
+    } catch {
+      // Best effort: leave on disk rather than crash callers.
+    }
+  }
+}
+
+/**
+ * Sweep sandbox-settings JSON files left behind by crashes. Call this at the
+ * start of any flow that creates sandbox settings so they do not accumulate.
+ */
+export function pruneStaleSandboxSettings(options = {}) {
+  pruneStaleTempFiles("sandbox", { prefix: "cc-sandbox-", ...options });
+}
+
+/**
+ * Sweep review MCP config JSON files left behind by crashes. The same SIGKILL
+ * window that strands a worktree can strand the MCP config; clean both.
+ */
+export function pruneStaleReviewMcpConfigs(options = {}) {
+  pruneStaleTempFiles("mcp", { prefix: "cc-mcp-", ...options });
+}
+
+// ---------------------------------------------------------------------------
 // Model & Effort Mapping
 // ---------------------------------------------------------------------------
 

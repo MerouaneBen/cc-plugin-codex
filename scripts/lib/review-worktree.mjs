@@ -86,7 +86,11 @@ export function createReviewWorktree(repoRoot, { label = "review", ref = "HEAD" 
     commit,
   ]);
   if (created.status !== 0) {
+    // `git worktree add` may have partially registered a `.git/worktrees/<name>`
+    // bookkeeping entry before failing on checkout or ENOSPC. Remove the
+    // filesystem directory and then prune so the partial entry is reclaimed.
     cleanupWorktreeDir(worktreePath);
+    runGit(repoRoot, ["worktree", "prune"]);
     throw new Error(
       `git worktree add failed: ${(created.stderr ?? "").trim() || "unknown error"}`
     );
@@ -117,6 +121,42 @@ function cleanupWorktreeDir(worktreePath) {
   } catch {
     // Last resort — leave on disk rather than crash the review pipeline.
   }
+}
+
+/**
+ * Choose how to expose the repository to a review run.
+ *
+ * For branch reviews we run inside an ephemeral worktree checked out at the
+ * branch tip: that gives us mutation isolation without losing any of the
+ * commits Claude needs to inspect.
+ *
+ * For working-tree reviews we deliberately *do not* create a worktree. A
+ * worktree-from-HEAD would hide the very staged/unstaged/untracked changes
+ * that the reviewer is supposed to inspect — `git status` would report clean,
+ * `git diff` would show nothing, and the MCP server pointed at the worktree
+ * would mislead Claude into thinking the repo is unchanged. Instead we run in
+ * the original repo and rely on the Bash-free allowlist for containment.
+ *
+ * Returns `{ cwd, gitRoot, cleanup }`. `gitRoot` is the path the MCP git server
+ * should be rooted at; `cwd` is what the Claude CLI should treat as the
+ * working directory.
+ */
+export function createReviewIsolation(repoRoot, target, { label = "review" } = {}) {
+  if (target?.mode === "working-tree") {
+    return {
+      cwd: repoRoot,
+      gitRoot: repoRoot,
+      cleanup: () => {},
+      isolated: false,
+    };
+  }
+  const worktree = createReviewWorktree(repoRoot, { label });
+  return {
+    cwd: worktree.path,
+    gitRoot: worktree.path,
+    cleanup: () => worktree.cleanup(),
+    isolated: true,
+  };
 }
 
 /**

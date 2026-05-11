@@ -177,6 +177,14 @@ describe("tool: log", () => {
     assert.match(res.result.content[0].text, /refs/);
   });
 
+  it("rejects refs that start with '-' (would be interpreted as a git flag)", () => {
+    for (const ref of ["-p", "--ext-diff", "--help", "-"]) {
+      const res = callTool("log", { refs: ref });
+      assert.equal(res.result.isError, true, `should reject ${ref}`);
+      assert.match(res.result.content[0].text, /flag|-/);
+    }
+  });
+
   it("accepts dotted ref ranges", () => {
     const res = callTool("log", { refs: "HEAD~1..HEAD", limit: 5 });
     assert.equal(res.result.isError, false);
@@ -290,5 +298,79 @@ describe("TOOL_DEFINITIONS", () => {
       assert.equal(typeof t.description, "string");
       assert.equal(t.inputSchema.type, "object");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stdio framing — runMcpGitServer end-to-end via the companion subcommand
+// ---------------------------------------------------------------------------
+
+describe("runMcpGitServer stdio framing", () => {
+  const companion = path.join(
+    path.dirname(new URL(import.meta.url).pathname),
+    "..",
+    "scripts",
+    "claude-companion.mjs"
+  );
+
+  function runServer(inputLines, env = {}) {
+    const child = spawnSync(process.execPath, [companion, "mcp-git"], {
+      input: inputLines.map((line) => `${line}\n`).join(""),
+      encoding: "utf8",
+      env: { ...process.env, CC_GIT_ROOT: repoRoot, ...env },
+      timeout: 10_000,
+    });
+    return child;
+  }
+
+  it("emits a response for a valid initialize request", () => {
+    const child = runServer([
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    ]);
+    assert.equal(child.status, 0);
+    const lines = child.stdout.trim().split("\n").filter(Boolean);
+    assert.equal(lines.length, 1);
+    const res = JSON.parse(lines[0]);
+    assert.equal(res.id, 1);
+    assert.ok(res.result?.serverInfo);
+  });
+
+  it("emits an Invalid Request error even when the payload is not an object", () => {
+    const child = runServer(["[1,2,3]", "true", "\"hello\"", "42"]);
+    assert.equal(child.status, 0);
+    const lines = child.stdout.trim().split("\n").filter(Boolean);
+    // One -32600 response per malformed payload.
+    assert.equal(lines.length, 4);
+    for (const line of lines) {
+      const res = JSON.parse(line);
+      assert.equal(res.error.code, -32600);
+      assert.equal(res.id, null);
+    }
+  });
+
+  it("emits Parse error for non-JSON lines", () => {
+    const child = runServer(["this is not json"]);
+    assert.equal(child.status, 0);
+    const res = JSON.parse(child.stdout.trim());
+    assert.equal(res.error.code, -32700);
+  });
+
+  it("does not respond to notifications (no id)", () => {
+    const child = runServer([
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    ]);
+    assert.equal(child.status, 0);
+    assert.equal(child.stdout.trim(), "");
+  });
+
+  it("exits non-zero when CC_GIT_ROOT is missing", () => {
+    const child = spawnSync(process.execPath, [companion, "mcp-git"], {
+      input: "",
+      encoding: "utf8",
+      env: { ...process.env, CC_GIT_ROOT: "" },
+      timeout: 5_000,
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /CC_GIT_ROOT/);
   });
 });
