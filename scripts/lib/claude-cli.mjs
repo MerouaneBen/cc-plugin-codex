@@ -16,6 +16,16 @@ import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mj
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
 const CLAUDE_BIN = "claude";
+const CLAUDE_LOCAL_OVERRIDE_ENV_KEYS = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_API_BASE_URL",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+];
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
@@ -69,6 +79,66 @@ function sliceTextTailByBytes(text, maxBytes) {
 function appendTextTail(existing, chunk, maxBytes) {
   const next = `${existing ?? ""}${chunk ?? ""}`;
   return sliceTextTailByBytes(next, maxBytes);
+}
+
+function resolveClaudeSettingsPath(settingsPath = null) {
+  if (settingsPath) {
+    return settingsPath;
+  }
+  const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  return path.join(claudeConfigDir, "settings.json");
+}
+
+function loadClaudeConfiguredEnv(settingsPath = null) {
+  const resolvedPath = resolveClaudeSettingsPath(settingsPath);
+  try {
+    if (!fs.existsSync(resolvedPath)) {
+      return {};
+    }
+    const parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+    if (parsed?.env && typeof parsed.env === "object" && !Array.isArray(parsed.env)) {
+      return parsed.env;
+    }
+    return {};
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackUrl(rawValue) {
+  if (!rawValue || typeof rawValue !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(rawValue);
+    return new Set(["127.0.0.1", "localhost", "::1", "[::1]"]).has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function buildClaudeSpawnEnv(baseEnv = process.env, options = {}) {
+  const nextEnv = { ...baseEnv };
+  const configuredEnv = Object.prototype.hasOwnProperty.call(options, "configuredEnv")
+    ? options.configuredEnv
+    : loadClaudeConfiguredEnv(options.settingsPath ?? null);
+
+  // If the Claude settings file is unreadable, preserve the inherited env.
+  if (configuredEnv == null) {
+    return nextEnv;
+  }
+
+  for (const key of CLAUDE_LOCAL_OVERRIDE_ENV_KEYS) {
+    const value = nextEnv[key];
+    if (!value || Object.prototype.hasOwnProperty.call(configuredEnv, key)) {
+      continue;
+    }
+    if (isLoopbackUrl(value)) {
+      delete nextEnv[key];
+    }
+  }
+
+  return nextEnv;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,17 +505,43 @@ export function cleanupSandboxSettings(filePath) {
 // ---------------------------------------------------------------------------
 
 export const MODEL_ALIASES = new Map([
-  ["sonnet", "claude-sonnet-4-6"],
+  ["opus", "claude-opus-4-7[1m]"],
+  ["sonnet", "claude-sonnet-4-6[1m]"],
   ["haiku", "claude-haiku-4-5"],
 ]);
 
 export const EFFORT_ALIASES = {
   none: "low",
   minimal: "low",
-  xhigh: "max",
 };
 
-export const VALID_EFFORTS = new Set(["low", "medium", "high", "max"]);
+export const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+export const DEFAULT_MODEL = "opus";
+
+export const DEFAULT_EFFORT_BY_MODEL = new Map([
+  ["opus", "xhigh"],
+  ["claude-opus-4-7", "xhigh"],
+  ["claude-opus-4-7[1m]", "xhigh"],
+  ["sonnet", "high"],
+  ["claude-sonnet-4-6", "high"],
+  ["claude-sonnet-4-6[1m]", "high"],
+]);
+
+export function resolveDefaultModel(model) {
+  if (model == null || String(model).trim() === "") {
+    return DEFAULT_MODEL;
+  }
+  return model;
+}
+
+export function resolveDefaultEffort(model, effort) {
+  if (effort != null && String(effort).trim() !== "") {
+    return effort;
+  }
+  const key = String(model ?? "").trim().toLowerCase();
+  return DEFAULT_EFFORT_BY_MODEL.get(key);
+}
 
 export function resolveModel(model) {
   if (!model) return undefined;
@@ -543,6 +639,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
       cwd,
       detached: true, // new process group for safe cancellation
       stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
+      env: buildClaudeSpawnEnv(process.env),
     });
 
     let pidIdentity = null;
