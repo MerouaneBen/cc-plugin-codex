@@ -12,6 +12,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
@@ -434,6 +435,41 @@ export const SANDBOX_READ_ONLY_TOOLS = [
   "Agent(explore,plan)",
 ];
 
+/**
+ * MCP server name used for the bundled read-only git MCP server. Exposes tools as
+ * `mcp__<SERVER_NAME>__<toolName>` (see scripts/lib/mcp-git.mjs for the catalog).
+ */
+export const REVIEW_MCP_SERVER_NAME = "gitReview";
+
+export const REVIEW_MCP_TOOL_NAMES = [
+  "diff",
+  "log",
+  "show",
+  "blame",
+  "status",
+  "grep",
+  "ls_files",
+];
+
+export const REVIEW_MCP_ALLOWED_TOOLS = REVIEW_MCP_TOOL_NAMES.map(
+  (name) => `mcp__${REVIEW_MCP_SERVER_NAME}__${name}`
+);
+
+/**
+ * Tools exposed to review/adversarial-review runs. Bash is intentionally absent —
+ * the Claude CLI does not strictly enforce `Bash(<pattern>:*)` sub-patterns, so any
+ * Bash entry would open the full Bash surface. Git operations are surfaced through
+ * the bundled read-only git MCP server instead (`REVIEW_MCP_ALLOWED_TOOLS`).
+ */
+export const SANDBOX_REVIEW_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  "WebSearch",
+  "WebFetch",
+  ...REVIEW_MCP_ALLOWED_TOOLS,
+];
+
 // ---------------------------------------------------------------------------
 // Sandbox Settings — OS-level isolation via Claude Code's sandbox feature.
 // Written to a temp file and passed via --settings.
@@ -442,7 +478,10 @@ export const SANDBOX_READ_ONLY_TOOLS = [
 /**
  * Sandbox presets matching Codex sandbox modes.
  *
- * read-only:       no writes at all, no network from Bash.
+ * read-only:       no file writes outside the OS temp dir. Network is allowed so
+ *                  that `WebFetch`, `WebSearch`, and the Claude CLI's API path keep
+ *                  working; the review allowlist excludes Bash entirely, so there
+ *                  is no shell surface to exfiltrate or mutate state through.
  * workspace-write: Bash can write to cwd + OS temp dir only, no network from Bash.
  *                  All tools allowed (no allowedTools restriction).
  */
@@ -450,12 +489,11 @@ export const SANDBOX_SETTINGS = {
   "read-only": {
     sandbox: {
       enabled: true,
-      autoAllowBashIfSandboxed: true,
+      // No Bash in the review allowlist, but keep this flag conservative so that
+      // any sandbox-aware tool still has to opt in explicitly.
+      autoAllowBashIfSandboxed: false,
       filesystem: {
         allowWrite: [SANDBOX_TEMP_DIR],
-      },
-      network: {
-        allowedDomains: [],
       },
     },
   },
@@ -495,6 +533,65 @@ export function createSandboxSettings(mode) {
 }
 
 export function cleanupSandboxSettings(filePath) {
+  if (filePath) {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review MCP config
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the absolute path of the bundled claude-companion.mjs script so the
+ * `mcp-git` subcommand can be invoked from any cwd. Uses `fileURLToPath` so the
+ * resolution works on Windows where `new URL(...).pathname` is not a usable
+ * filesystem path.
+ */
+function resolveCompanionScriptPath() {
+  return path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "claude-companion.mjs"
+  );
+}
+
+/**
+ * Write an `--mcp-config` JSON file that registers the bundled read-only git
+ * MCP server. The server's CC_GIT_ROOT env var is set to `gitRoot` so that its
+ * tool handlers operate strictly inside the review worktree.
+ */
+export function createReviewMcpConfig(gitRoot) {
+  if (!gitRoot || typeof gitRoot !== "string") {
+    throw new Error("createReviewMcpConfig: gitRoot is required");
+  }
+  const companionScript = resolveCompanionScriptPath();
+  const config = {
+    mcpServers: {
+      [REVIEW_MCP_SERVER_NAME]: {
+        command: process.execPath,
+        args: [companionScript, "mcp-git"],
+        env: {
+          CC_GIT_ROOT: gitRoot,
+        },
+      },
+    },
+  };
+
+  const dir = path.join(resolvePluginRuntimeRoot(), "mcp");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpFile = path.join(
+    dir,
+    `cc-mcp-${process.pid}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.json`
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify(config), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return tmpFile;
+}
+
+export function cleanupReviewMcpConfig(filePath) {
   if (filePath) {
     try { fs.unlinkSync(filePath); } catch {}
   }
@@ -619,6 +716,12 @@ export function buildArgs(prompt, options = {}) {
   if (options.settingsFile) {
     args.push("--settings", options.settingsFile);
   }
+  if (options.mcpConfigFile) {
+    args.push("--mcp-config", options.mcpConfigFile);
+  }
+  if (options.strictMcpConfig) {
+    args.push("--strict-mcp-config");
+  }
 
   args.push("--", prompt);
   return args;
@@ -722,12 +825,17 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
 /**
  * Execute a review (non-streaming, no session persistence).
+ *
+ * The default allowlist is `SANDBOX_REVIEW_TOOLS` (Read/Glob/Grep/Web + the git
+ * MCP tool surface). Callers that want to run with an alternative allowlist —
+ * e.g., legacy `SANDBOX_READ_ONLY_TOOLS` for back-compat — can override via
+ * `options.allowedTools`. Bash is intentionally excluded by default.
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
   // Use streaming mode (same as runClaudeTurn) for progress reporting
   const result = await runClaudeTurn(cwd, prompt, {
     noSessionPersistence: true,
-    allowedTools: SANDBOX_READ_ONLY_TOOLS,
+    allowedTools: SANDBOX_REVIEW_TOOLS,
     ...options,
   });
 

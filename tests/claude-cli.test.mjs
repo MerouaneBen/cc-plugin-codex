@@ -832,11 +832,14 @@ describe("SANDBOX_SETTINGS", () => {
     assert.ok("workspace-write" in SANDBOX_SETTINGS);
   });
 
-  it("read-only enables sandbox with allowWrite [SANDBOX_TEMP_DIR]", () => {
+  it("read-only enables sandbox with allowWrite [SANDBOX_TEMP_DIR] and unrestricted network", () => {
     const s = SANDBOX_SETTINGS["read-only"].sandbox;
     assert.equal(s.enabled, true);
     assert.deepEqual(s.filesystem.allowWrite, [SANDBOX_TEMP_DIR]);
-    assert.deepEqual(s.network.allowedDomains, []);
+    // network is intentionally omitted so that WebFetch/WebSearch and Claude's
+    // own API path remain reachable; review safety comes from removing Bash
+    // from the allowlist instead.
+    assert.equal(s.network, undefined);
   });
 
   it("workspace-write enables sandbox with allowWrite ['.', SANDBOX_TEMP_DIR]", () => {

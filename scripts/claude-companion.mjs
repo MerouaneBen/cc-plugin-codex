@@ -44,7 +44,13 @@ import {
   SANDBOX_READ_ONLY_TOOLS,
   createSandboxSettings,
   cleanupSandboxSettings,
+  createReviewMcpConfig,
+  cleanupReviewMcpConfig,
 } from "./lib/claude-cli.mjs";
+import {
+  createReviewWorktree,
+  pruneStaleReviewWorktrees,
+} from "./lib/review-worktree.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import {
   collectReviewContext,
@@ -466,6 +472,9 @@ async function executeReviewRun(request) {
   ensureClaudeReady(request.cwd);
   ensureGitRepository(request.cwd);
 
+  // Sweep dead worktrees from previous crashed runs before allocating a new one.
+  try { pruneStaleReviewWorktrees(request.cwd); } catch {}
+
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
     scope: request.scope
@@ -474,20 +483,32 @@ async function executeReviewRun(request) {
   const reviewName = request.reviewName ?? "Review";
 
   if (reviewName === "Review") {
-    // Standard review via Claude CLI — read-only sandbox
+    // Standard review via Claude CLI — read-only sandbox + ephemeral worktree.
     const context = collectReviewContext(request.cwd, target);
     const prompt = buildReviewPrompt(context);
-    const sandboxSettingsFile = createSandboxSettings("read-only");
     let result;
+    const sandboxSettingsFile = createSandboxSettings("read-only");
     try {
-      result = await runClaudeReview(request.cwd, prompt, {
-        model: request.model,
-        effort: request.effort,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
-      });
+      const worktree = createReviewWorktree(request.cwd, { label: "review" });
+      try {
+        const mcpConfigFile = createReviewMcpConfig(worktree.path);
+        try {
+          result = await runClaudeReview(worktree.path, prompt, {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          });
+        } finally {
+          cleanupReviewMcpConfig(mcpConfigFile);
+        }
+      } finally {
+        worktree.cleanup();
+      }
     } finally {
       cleanupSandboxSettings(sandboxSettingsFile);
     }
@@ -528,26 +549,38 @@ async function executeReviewRun(request) {
     };
   }
 
-  // Adversarial review with structured output — read-only sandbox
+  // Adversarial review with structured output — read-only sandbox + ephemeral worktree.
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildAdversarialReviewPrompt(context, focusText);
   const schema = readOutputSchema(REVIEW_SCHEMA_PATH);
-  const sandboxSettingsFile = createSandboxSettings("read-only");
   let result;
+  const sandboxSettingsFile = createSandboxSettings("read-only");
   try {
-    result = await runClaudeAdversarialReview(
-      context.repoRoot,
-      prompt,
-      schema,
-      {
-        model: request.model,
-        effort: request.effort,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
+    const worktree = createReviewWorktree(context.repoRoot, { label: "adversarial-review" });
+    try {
+      const mcpConfigFile = createReviewMcpConfig(worktree.path);
+      try {
+        result = await runClaudeAdversarialReview(
+          worktree.path,
+          prompt,
+          schema,
+          {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          }
+        );
+      } finally {
+        cleanupReviewMcpConfig(mcpConfigFile);
       }
-    );
+    } finally {
+      worktree.cleanup();
+    }
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
   }
@@ -1834,9 +1867,18 @@ async function main() {
     case "cancel":
       await handleCancel(argv);
       break;
+    case "mcp-git":
+      await handleMcpGit(argv);
+      break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);
   }
+}
+
+async function handleMcpGit(_argv) {
+  const { runMcpGitServer } = await import("./lib/mcp-git.mjs");
+  const exitCode = await runMcpGitServer();
+  process.exit(exitCode ?? 0);
 }
 
 main().catch((error) => {
