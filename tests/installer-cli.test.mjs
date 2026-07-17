@@ -329,6 +329,7 @@ import readline from "node:readline";
 
 const codexHome = ${JSON.stringify(codexHome)};
 const logPath = ${JSON.stringify(logPath)};
+const writableRootsPath = path.join(codexHome, "fake-writable-roots.json");
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 function readConfig(configPath) {
@@ -432,6 +433,55 @@ rl.on("line", (line) => {
 
   if (message.method === "plugin/install") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: handleInstall(message.params) }) + "\\n");
+    return;
+  }
+
+  if (message.method === "config/read") {
+    const writableRoots = fs.existsSync(writableRootsPath)
+      ? JSON.parse(fs.readFileSync(writableRootsPath, "utf8"))
+      : [];
+    process.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        config: {
+          sandbox_workspace_write: {
+            writable_roots: writableRoots,
+          },
+        },
+        origins: {},
+        layers: [
+          {
+            name: {
+              type: "user",
+              file: "/tmp/config.toml",
+              profile: null,
+            },
+            version: "sha256:installer-config",
+            config: {
+              sandbox_workspace_write: {
+                writable_roots: writableRoots,
+              },
+            },
+          },
+        ],
+      },
+    }) + "\\n");
+    return;
+  }
+
+  if (message.method === "config/batchWrite") {
+    const edit = message.params.edits.find(
+      (candidate) => candidate.keyPath === "sandbox_workspace_write.writable_roots"
+    );
+    if (edit) {
+      fs.writeFileSync(writableRootsPath, JSON.stringify(edit.value), "utf8");
+    }
+    process.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { status: "ok" },
+    }) + "\\n");
     return;
   }
 
@@ -782,7 +832,7 @@ describe("installer-cli", () => {
     runInstaller("install", homeDir, sourceRoot, {
       ...fakeCodex.env,
       CC_PLUGIN_CODEX_MARKETPLACE_SOURCE: marketplaceRoot,
-      CC_PLUGIN_CODEX_MARKETPLACE_NAME: "sendbird",
+      CC_PLUGIN_CODEX_MARKETPLACE_NAME: "stale-config-name",
     });
 
     const configFile = path.join(homeDir, ".codex", "config.toml");
@@ -805,6 +855,28 @@ describe("installer-cli", () => {
     assert.ok(
       requests.some((request) => request.method === "marketplace/add"),
       "installer should call Codex marketplace/add"
+    );
+    const writableRootRequest = requests.find(
+      (request) =>
+        request.method === "config/batchWrite" &&
+        request.params.edits.some(
+          (edit) => edit.keyPath === "sandbox_workspace_write.writable_roots"
+        )
+    );
+    assert.deepEqual(writableRootRequest?.params.edits, [
+      {
+        keyPath: "sandbox_workspace_write.writable_roots",
+        value: [
+          path.join(homeDir, ".codex", "plugins", "data", "cc-sendbird"),
+          path.join(homeDir, ".codex", "plugins", "data", "cc"),
+          path.join(homeDir, ".codex", "plugins", "data", "claude-code"),
+        ],
+        mergeStrategy: "replace",
+      },
+    ]);
+    assert.equal(
+      writableRootRequest?.params.expectedVersion,
+      "sha256:installer-config"
     );
     assert.equal(
       pluginInstallRequest?.params?.marketplacePath,
@@ -1033,6 +1105,15 @@ describe("installer-cli", () => {
     assert.doesNotMatch(config, /\[plugins\."cc@local-plugins"\]/);
     assert.doesNotMatch(config, /\[plugins\."cc@sendbird"\]/);
     assert.equal(hooks.hooks.SessionStart[0].hooks[0].command, "echo custom-hook");
+    assert.deepEqual(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(codexDir, "fake-writable-roots.json"),
+          "utf8"
+        )
+      ),
+      []
+    );
   });
 
   it("removes versioned marketplace cache entries during uninstall", () => {

@@ -16,6 +16,28 @@ function read(relativePath) {
   return fs.readFileSync(path.join(PROJECT_ROOT, relativePath), "utf8");
 }
 
+test("built-in child commands preserve the workspace for reserved job ids", () => {
+  const skills = [
+    ["rescue", "skills/rescue/SKILL.md"],
+    ["review", "skills/review/SKILL.md"],
+    ["adversarial review", "skills/adversarial-review/SKILL.md"],
+  ];
+
+  for (const [name, skillPath] of skills) {
+    const skill = read(skillPath);
+    assert.match(
+      skill,
+      /Whenever forwarding that reserved `--job-id`, also pass `--cwd <workspace-root>` using `workspaceRoot` from the same helper response/i,
+      `${name} must keep reserved job ids in their workspace`,
+    );
+    assert.match(
+      skill,
+      /include the matching `--cwd <workspace-root>` whenever the (?:exact )?command (?:contains|includes) (?:that )?reserved `--job-id/i,
+      `${name} child command must forward the reserved job workspace`,
+    );
+  }
+});
+
 test("internal runtime references keep the active-root and notification invariants", () => {
   const reviewRuntime = read("internal-skills/review-runtime/runtime.md");
   const rescueRuntime = read("internal-skills/cli-runtime/runtime.md");
@@ -329,6 +351,8 @@ test("setup skill repairs native plugin hook feature gates before the final setu
   assert.match(setup, /\[features\]\.hooks/i);
   assert.match(setup, /\[features\]\.plugin_hooks/i);
   assert.match(setup, /native hook trust hashes/i);
+  assert.match(setup, /plugin-data destination .* writable-root list/i);
+  assert.match(setup, /restart Codex and rerun the same setup command/i);
   assert.doesNotMatch(setup, /install-hooks\.mjs/i);
 });
 
