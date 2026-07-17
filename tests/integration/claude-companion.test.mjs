@@ -168,6 +168,7 @@ function createTestEnvironment() {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -183,10 +184,26 @@ import readline from "node:readline";
 
 const hooks = ${JSON.stringify(hooks, null, 2)};
 const logPath = ${JSON.stringify(logPath)};
+const configStatePath = ${JSON.stringify(
+      path.join(testEnv.rootDir, "fake-codex-config-state.json")
+    )};
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 function write(message) {
   process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+function readConfigState() {
+  return fs.existsSync(configStatePath)
+    ? JSON.parse(fs.readFileSync(configStatePath, "utf8"))
+    : {
+        writableRoots: [${JSON.stringify(testEnv.workspaceDir)}],
+        version: "sha256:config-0",
+      };
+}
+
+function writeConfigState(state) {
+  fs.writeFileSync(configStatePath, JSON.stringify(state), "utf8");
 }
 
 rl.on("line", (line) => {
@@ -211,7 +228,67 @@ rl.on("line", (line) => {
     });
     return;
   }
+  if (message.method === "config/read") {
+    const state = readConfigState();
+    write({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        config: {
+          sandbox_workspace_write: {
+            writable_roots: state.writableRoots,
+          },
+        },
+        origins: {},
+        layers: [
+          {
+            name: {
+              type: "user",
+              file: "/tmp/config.toml",
+              profile: null,
+            },
+            version: state.version,
+            config: {
+              sandbox_workspace_write: {
+                writable_roots: state.writableRoots,
+              },
+            },
+          },
+        ],
+      },
+    });
+    return;
+  }
   if (message.method === "config/batchWrite") {
+    const state = readConfigState();
+    if (
+      message.params.expectedVersion != null &&
+      message.params.expectedVersion !== state.version
+    ) {
+      write({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: {
+          code: -32600,
+          message: "ConfigVersionConflict: Configuration was modified since last read",
+        },
+      });
+      return;
+    }
+    const writableRootsEdit = message.params.edits.find(
+      (edit) => edit.keyPath === "sandbox_workspace_write.writable_roots"
+    );
+    if (writableRootsEdit) {
+      writeConfigState({
+        writableRoots: writableRootsEdit.value,
+        version: "sha256:config-" + (Number(state.version.split("-").at(-1)) + 1),
+      });
+    } else {
+      writeConfigState({
+        ...state,
+        version: "sha256:config-" + (Number(state.version.split("-").at(-1)) + 1),
+      });
+    }
     write({ jsonrpc: "2.0", id: message.id, result: { status: "ok" } });
     return;
   }
@@ -290,7 +367,7 @@ function writeCurrentSessionMarker(testEnv, sessionId) {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     path.join(stateDir, "current-session.json"),
-    JSON.stringify({ sessionId, updatedAt: "2026-04-03T12:00:00Z" }, null, 2) + "\n",
+    JSON.stringify({ sessionId, updatedAt: new Date().toISOString() }, null, 2) + "\n",
     "utf8"
   );
 }
@@ -588,37 +665,77 @@ function assertCompletedReviewPayload(payload) {
 describe("claude-companion integration", () => {
   it("setup toggles the review gate on and off for the current workspace", () => {
     const testEnv = createTestEnvironment();
+    const fakeCodex = createFakeCodexAppServer(testEnv, []);
+    const setupEnv = {
+      ...testEnv.env,
+      CC_PLUGIN_CODEX_EXECUTABLE: process.execPath,
+      CC_PLUGIN_CODEX_APP_SERVER_ARGS_JSON: JSON.stringify([fakeCodex.serverPath]),
+    };
 
     try {
       const initial = runCompanionJson(
         ["setup", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: setupEnv }
       );
-      assert.equal(initial.reviewGateEnabled, false);
+      assert.equal(initial.reviewGateEnabled, null);
+      assert.match(
+        initial.nextSteps.join("\n"),
+        /Restart Codex.*rerun `\$cc:setup`/
+      );
 
       const enabled = runCompanion(
         ["setup", "--cwd", testEnv.workspaceDir, "--enable-review-gate"],
-        { env: testEnv.env }
+        { env: setupEnv }
       );
       assert.match(enabled.stdout, /review gate: enabled/i);
 
       const afterEnable = runCompanionJson(
         ["setup", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: setupEnv }
       );
       assert.equal(afterEnable.reviewGateEnabled, true);
 
       const disabled = runCompanion(
         ["setup", "--cwd", testEnv.workspaceDir, "--disable-review-gate"],
-        { env: testEnv.env }
+        { env: setupEnv }
       );
       assert.match(disabled.stdout, /review gate: disabled/i);
 
       const afterDisable = runCompanionJson(
         ["setup", "--cwd", testEnv.workspaceDir, "--json"],
-        { env: testEnv.env }
+        { env: setupEnv }
       );
       assert.equal(afterDisable.reviewGateEnabled, false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("setup reports plugin-state repair guidance when the app-server is unavailable", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const report = runCompanionJson(
+        ["setup", "--cwd", testEnv.workspaceDir, "--json"],
+        {
+          env: {
+            ...testEnv.env,
+            CC_PLUGIN_CODEX_EXECUTABLE: path.join(
+              testEnv.rootDir,
+              "missing-codex"
+            ),
+          },
+        }
+      );
+
+      assert.equal(report.ready, false);
+      assert.equal(report.reviewGateEnabled, null);
+      assert.equal(report.pluginState.ready, false);
+      assert.match(report.pluginState.detail, /unable to configure/i);
+      assert.match(
+        report.nextSteps.join("\n"),
+        /sandbox_workspace_write\.writable_roots/
+      );
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -701,7 +818,7 @@ describe("claude-companion integration", () => {
 
     try {
       const report = runCompanionJson(
-        ["setup", "--cwd", testEnv.workspaceDir, "--json"],
+        ["setup", "--cwd", testEnv.workspaceDir, "--json", "--enable-review-gate"],
         {
           env: {
             ...testEnv.env,
@@ -712,14 +829,19 @@ describe("claude-companion integration", () => {
         }
       );
 
-      assert.equal(report.ready, true);
+      assert.equal(report.ready, false);
+      assert.equal(report.reviewGateEnabled, null);
       assert.equal(report.hookTrust.ready, true);
       assert.equal(report.hookTrust.found, 3);
       assert.equal(report.hookTrust.trusted, 2);
       assert.match(report.hookTrust.detail, /trusted 2 native plugin hooks/i);
 
       const requests = readJsonLines(fakeCodex.logPath);
-      const writeRequest = requests.find((request) => request.method === "config/batchWrite");
+      const writeRequest = requests.find(
+        (request) =>
+          request.method === "config/batchWrite" &&
+          request.params.edits.some((edit) => edit.keyPath === "hooks.state")
+      );
       assert.ok(writeRequest, "expected setup to write hook trust state");
       assert.deepEqual(writeRequest.params.edits, [
         {
@@ -736,6 +858,50 @@ describe("claude-companion integration", () => {
         },
       ]);
       assert.equal(writeRequest.params.reloadUserConfig, true);
+
+      const writableRootRequest = requests.find(
+        (request) =>
+          request.method === "config/batchWrite" &&
+          request.params.edits.some(
+            (edit) => edit.keyPath === "sandbox_workspace_write.writable_roots"
+          )
+      );
+      assert.ok(writableRootRequest, "expected setup to allow plugin data writes");
+      assert.deepEqual(writableRootRequest.params.edits, [
+        {
+          keyPath: "sandbox_workspace_write.writable_roots",
+          value: [
+            testEnv.workspaceDir,
+            path.join(testEnv.homeDir, ".codex", "plugins", "data", "cc"),
+            path.join(
+              testEnv.homeDir,
+              ".codex",
+              "plugins",
+              "data",
+              "claude-code"
+            ),
+          ],
+          mergeStrategy: "replace",
+        },
+      ]);
+      assert.equal(writableRootRequest.params.expectedVersion, "sha256:config-1");
+      assert.match(
+        report.actionsTaken.join("\n"),
+        /Restart Codex so existing sessions use the updated writable roots/
+      );
+      assert.match(
+        report.actionsTaken.join("\n"),
+        /Deferred the review-gate change until plugin state write access is ready/
+      );
+      assert.match(
+        report.nextSteps.join("\n"),
+        /Restart Codex.*rerun `\$cc:setup`/
+      );
+      assert.equal(
+        fs.existsSync(path.join(stateDirFor(testEnv), "config.json")),
+        false,
+        "setup must not touch plugin state until the new sandbox root is active"
+      );
     } finally {
       cleanupTestEnvironment(testEnv);
     }

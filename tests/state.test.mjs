@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // State paths are workspace-hash based and resolveWorkspaceRoot() shells out to
 // git, so most tests use a real git repo cwd. A dedicated subprocess test below
@@ -45,7 +45,24 @@ import {
 
 // We'll use the project root as a known git-repo cwd for workspace resolution.
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const STATE_MODULE_URL = new URL("../scripts/lib/state.mjs", import.meta.url).href;
+const PROJECT_VERSION = JSON.parse(
+  fs.readFileSync(path.join(PROJECT_CWD, "package.json"), "utf8")
+).version;
+function installCachedStateModule(codexHome) {
+  const pluginRoot = path.join(
+    codexHome,
+    "plugins",
+    "cache",
+    "sendbird",
+    "cc",
+    PROJECT_VERSION
+  );
+  fs.mkdirSync(pluginRoot, { recursive: true });
+  fs.cpSync(path.join(PROJECT_CWD, "scripts"), path.join(pluginRoot, "scripts"), {
+    recursive: true,
+  });
+  return pathToFileURL(path.join(pluginRoot, "scripts", "lib", "state.mjs")).href;
+}
 
 function createTempGitRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-test-"));
@@ -161,7 +178,7 @@ describe("loadConfig / saveConfig", () => {
     assert.equal(cfg.stopReviewGate, true);
   });
 
-  it("migrates legacy claude-code plugin state into the cc plugin namespace and prunes old armed markers", () => {
+  it("migrates legacy plugin state into Codex's injected data root and prunes old armed markers", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-migrate-"));
     const codexHome = path.join(homeDir, ".codex");
     const repoDir = createTempGitRepo();
@@ -172,7 +189,15 @@ describe("loadConfig / saveConfig", () => {
         .update(realWorkspace)
         .digest("hex")
         .slice(0, 12);
-      const legacyStateDir = path.join(
+      const legacyCcStateDir = path.join(
+        codexHome,
+        "plugins",
+        "data",
+        "cc",
+        "state",
+        workspaceHash
+      );
+      const legacyClaudeStateDir = path.join(
         codexHome,
         "plugins",
         "data",
@@ -184,18 +209,20 @@ describe("loadConfig / saveConfig", () => {
         codexHome,
         "plugins",
         "data",
-        "cc",
+        "cc-sendbird",
         "state",
         workspaceHash
       );
+      const cachedStateModuleUrl = installCachedStateModule(codexHome);
 
-      fs.mkdirSync(legacyStateDir, { recursive: true });
+      fs.mkdirSync(legacyCcStateDir, { recursive: true });
       fs.writeFileSync(
-        path.join(legacyStateDir, "config.json"),
+        path.join(legacyCcStateDir, "config.json"),
         JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
         "utf8"
       );
-      fs.writeFileSync(path.join(legacyStateDir, "armed-old-session"), "", "utf8");
+      fs.mkdirSync(legacyClaudeStateDir, { recursive: true });
+      fs.writeFileSync(path.join(legacyClaudeStateDir, "armed-old-session"), "", "utf8");
 
       const result = spawnSync(
         process.execPath,
@@ -203,7 +230,7 @@ describe("loadConfig / saveConfig", () => {
           "--input-type=module",
           "-e",
           `
-            const mod = await import(${JSON.stringify(STATE_MODULE_URL)});
+            const mod = await import(${JSON.stringify(cachedStateModuleUrl)});
             const cwd = ${JSON.stringify(repoDir)};
             console.log(JSON.stringify({
               stateDir: mod.resolveStateDir(cwd),
@@ -217,6 +244,7 @@ describe("loadConfig / saveConfig", () => {
             HOME: homeDir,
             USERPROFILE: homeDir,
             CODEX_HOME: codexHome,
+            PLUGIN_DATA: path.join(homeDir, "unexpected-plugin-data"),
           },
           encoding: "utf8",
         }
@@ -227,8 +255,66 @@ describe("loadConfig / saveConfig", () => {
       assert.equal(payload.stateDir, nextStateDir);
       assert.equal(payload.config.stopReviewGate, true);
       assert.equal(fs.existsSync(path.join(nextStateDir, "config.json")), true);
-      assert.equal(fs.existsSync(path.join(legacyStateDir, "config.json")), false);
+      assert.equal(fs.existsSync(path.join(legacyCcStateDir, "config.json")), false);
+      assert.equal(fs.existsSync(legacyClaudeStateDir), false);
       assert.equal(fs.existsSync(path.join(nextStateDir, "armed-old-session")), false);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not migrate a legacy root into an injected symlink to itself", () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-alias-"));
+    const codexHome = path.join(homeDir, ".codex");
+    const repoDir = createTempGitRepo();
+    const legacyRoot = path.join(codexHome, "plugins", "data", "cc");
+    const expectedRoot = path.join(codexHome, "plugins", "data", "cc-sendbird");
+
+    try {
+      const cachedStateModuleUrl = installCachedStateModule(codexHome);
+      const workspaceHash = createHash("sha256")
+        .update(fs.realpathSync.native(repoDir))
+        .digest("hex")
+        .slice(0, 12);
+      const stateDir = path.join(legacyRoot, "state", workspaceHash);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, "config.json"),
+        JSON.stringify({ version: 1, stopReviewGate: true }) + "\n",
+        "utf8"
+      );
+      fs.symlinkSync(
+        legacyRoot,
+        expectedRoot,
+        process.platform === "win32" ? "junction" : "dir"
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+            const mod = await import(${JSON.stringify(cachedStateModuleUrl)});
+            console.log(JSON.stringify(mod.getConfig(${JSON.stringify(repoDir)})));
+          `,
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: homeDir,
+            USERPROFILE: homeDir,
+            CODEX_HOME: codexHome,
+            PLUGIN_DATA: expectedRoot,
+          },
+          encoding: "utf8",
+        }
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(JSON.parse(result.stdout).stopReviewGate, true);
+      assert.equal(fs.existsSync(path.join(stateDir, "config.json")), true);
     } finally {
       fs.rmSync(homeDir, { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
@@ -519,6 +605,38 @@ describe("current session marker", () => {
     setCurrentSession(repoDir, "newer-session");
     clearCurrentSession(repoDir, sessionId);
     assert.equal(getCurrentSession(repoDir), "newer-session");
+  });
+
+  it("expires a stale current-session fallback marker", () => {
+    setCurrentSession(repoDir, sessionId);
+    const markerFile = path.join(resolveStateDir(repoDir), "current-session.json");
+    fs.writeFileSync(
+      markerFile,
+      JSON.stringify({
+        sessionId,
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      }),
+      "utf8"
+    );
+
+    assert.equal(getCurrentSession(repoDir), null);
+    assert.equal(fs.existsSync(markerFile), false);
+  });
+
+  it("expires a current-session marker with excessive future clock skew", () => {
+    setCurrentSession(repoDir, sessionId);
+    const markerFile = path.join(resolveStateDir(repoDir), "current-session.json");
+    fs.writeFileSync(
+      markerFile,
+      JSON.stringify({
+        sessionId,
+        updatedAt: "9999-01-01T00:00:00.000Z",
+      }),
+      "utf8"
+    );
+
+    assert.equal(getCurrentSession(repoDir), null);
+    assert.equal(fs.existsSync(markerFile), false);
   });
 });
 

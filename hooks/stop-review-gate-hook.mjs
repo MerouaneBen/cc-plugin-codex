@@ -53,6 +53,7 @@ const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const STOP_REVIEW_SUCCESS_NOTE = "Claude Code turn-end review passed.";
 const STOP_REVIEW_NO_EDIT_NOTE =
   "Claude Code turn-end review skipped: the most recent turn made no net edits.";
+const MAX_INLINE_REASON_CHARS = 1_500;
 
 function emitDecision(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -63,6 +64,19 @@ function logNote(message) {
     return;
   }
   process.stderr.write(`${message}\n`);
+}
+
+function boundReasonForHookOutput(reason, runId) {
+  const text = String(reason ?? "");
+  if (text.length <= MAX_INLINE_REASON_CHARS) {
+    return text;
+  }
+  const suffix = [
+    "",
+    "",
+    `Full stop-review output was saved in the ${runId} snapshot.`
+  ].join("\n");
+  return `${text.slice(0, MAX_INLINE_REASON_CHARS).trimEnd()}…${suffix}`;
 }
 
 function buildSetupNote(cwd) {
@@ -426,11 +440,12 @@ async function main() {
       runningTaskNote,
       ...fingerprintFields,
     });
+    const inlineReason = runningTaskNote
+      ? `${runningTaskNote} ${review.reason}`
+      : review.reason;
     emitDecision({
       decision: "block",
-      reason: runningTaskNote
-        ? `${runningTaskNote} ${review.reason}`
-        : review.reason,
+      reason: boundReasonForHookOutput(inlineReason, stopReviewRun.runId),
     });
     return;
   }

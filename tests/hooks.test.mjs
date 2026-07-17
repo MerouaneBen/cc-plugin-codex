@@ -16,11 +16,13 @@ import {
   REVIEW_MCP_SERVER_NAME,
   SANDBOX_STOP_REVIEW_TOOLS,
 } from "../scripts/lib/claude-cli.mjs";
-import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
 const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
+const PROJECT_VERSION = JSON.parse(
+  fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8")
+).version;
 const SESSION_HOOK = path.join(
   PROJECT_ROOT,
   "hooks",
@@ -36,6 +38,7 @@ const UNREAD_HOOK = path.join(
   "hooks",
   "unread-result-hook.mjs"
 );
+const HOOKS_JSON = path.join(PROJECT_ROOT, "hooks", "hooks.json");
 const PLUGIN_CONFIG_BLOCK = '[plugins."cc@local-plugins"]\nenabled = true\n';
 
 function createFakeClaudeBinary(binDir) {
@@ -94,6 +97,14 @@ if (process.env.CLAUDE_MCP_CONFIG_FILE) {
           text: "ALLOW: partial"
         }
       }
+    }) + "\\n");
+    process.exit(0);
+  }
+  if (process.env.CLAUDE_LONG_BLOCK_RESULT === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      session_id: "hook-session-result",
+      result: "BLOCK: " + "x".repeat(3000)
     }) + "\\n");
     process.exit(0);
   }
@@ -178,22 +189,51 @@ function createHookEnvironment(options = {}) {
   };
 }
 
+function installCachedPlugin(testEnv) {
+  const pluginRoot = path.join(
+    testEnv.homeDir,
+    ".codex",
+    "plugins",
+    "cache",
+    "sendbird",
+    "cc",
+    PROJECT_VERSION
+  );
+  fs.mkdirSync(pluginRoot, { recursive: true });
+  for (const entry of ["hooks", "prompts", "scripts"]) {
+    fs.cpSync(path.join(PROJECT_ROOT, entry), path.join(pluginRoot, entry), {
+      recursive: true,
+    });
+  }
+  fs.writeFileSync(
+    path.join(testEnv.homeDir, ".codex", "config.toml"),
+    '[plugins."cc@sendbird"]\nenabled = true\n',
+    "utf8"
+  );
+  return {
+    pluginDataRoot: path.join(
+      testEnv.homeDir,
+      ".codex",
+      "plugins",
+      "data",
+      "cc-sendbird"
+    ),
+    stopHook: path.join(pluginRoot, "hooks", "stop-review-gate-hook.mjs"),
+  };
+}
+
 function cleanupHookEnvironment(testEnv) {
   fs.rmSync(testEnv.rootDir, { recursive: true, force: true });
 }
 
-function stateDirFor(homeDir, workspaceDir) {
+function stateDirFor(homeDir, workspaceDir, pluginDataRoot = null) {
   const realWorkspace = fs.realpathSync.native(workspaceDir);
   const workspaceHash = createHash("sha256")
     .update(realWorkspace)
     .digest("hex")
     .slice(0, 12);
   return path.join(
-    homeDir,
-    ".codex",
-    "plugins",
-    "data",
-    "cc",
+    pluginDataRoot ?? path.join(homeDir, ".codex", "plugins", "data", "cc"),
     "state",
     workspaceHash
   );
@@ -268,6 +308,29 @@ function writeTurnBaselineSnapshot(testEnv, sessionId, fingerprint) {
 }
 
 describe("hooks", () => {
+  it("native plugin hook events stay within upstream Codex hook event names", () => {
+    const upstreamHookEventNames = new Set([
+      "PreToolUse",
+      "PermissionRequest",
+      "PostToolUse",
+      "PreCompact",
+      "PostCompact",
+      "SessionStart",
+      "UserPromptSubmit",
+      "Stop",
+    ]);
+    const hooksConfig = JSON.parse(fs.readFileSync(HOOKS_JSON, "utf8"));
+    const pluginHookEvents = Object.keys(hooksConfig.hooks ?? {});
+
+    assert.ok(pluginHookEvents.length > 0);
+    for (const eventName of pluginHookEvents) {
+      assert.ok(
+        upstreamHookEventNames.has(eventName),
+        `${eventName} is not an upstream Codex hook event`
+      );
+    }
+  });
+
   it("stop-review hook uses read-only sandbox and git MCP when review gate is enabled", () => {
     const testEnv = createHookEnvironment();
 
@@ -373,6 +436,85 @@ describe("hooks", () => {
     }
   });
 
+  it("writes cached marketplace hook state under Codex's injected PLUGIN_DATA root", () => {
+    const testEnv = createHookEnvironment({
+      createClaude: false,
+      initGit: false,
+    });
+
+    try {
+      const { pluginDataRoot, stopHook } = installCachedPlugin(testEnv);
+      runHook(
+        stopHook,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          last_assistant_message: "review me",
+        },
+        {
+          ...testEnv.env,
+          PLUGIN_DATA: pluginDataRoot,
+        }
+      );
+
+      const snapshotFile = path.join(
+        stateDirFor(testEnv.homeDir, testEnv.workspaceDir, pluginDataRoot),
+        "stop-review-last.json"
+      );
+      assert.equal(fs.existsSync(snapshotFile), true);
+      assert.equal(
+        fs.existsSync(
+          path.join(
+            stateDirFor(testEnv.homeDir, testEnv.workspaceDir),
+            "stop-review-last.json"
+          )
+        ),
+        false
+      );
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
+  it("ignores a PLUGIN_DATA root that does not match the installed marketplace", () => {
+    const testEnv = createHookEnvironment({
+      createClaude: false,
+      initGit: false,
+    });
+
+    try {
+      const { pluginDataRoot, stopHook } = installCachedPlugin(testEnv);
+      const unexpectedRoot = path.join(testEnv.rootDir, "unexpected-plugin-data");
+      runHook(
+        stopHook,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          last_assistant_message: "review me",
+        },
+        {
+          ...testEnv.env,
+          PLUGIN_DATA: unexpectedRoot,
+        }
+      );
+
+      assert.equal(
+        fs.existsSync(
+          path.join(
+            stateDirFor(testEnv.homeDir, testEnv.workspaceDir, pluginDataRoot),
+            "stop-review-last.json"
+          )
+        ),
+        true
+      );
+      assert.equal(fs.existsSync(unexpectedRoot), false);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("stop-review hook skips Claude when the latest turn made no net edits", async () => {
     const testEnv = createHookEnvironment();
 
@@ -420,44 +562,49 @@ describe("hooks", () => {
     }
   });
 
-  it("session lifecycle hook resolves queued session jobs on SessionEnd", () => {
+  it("unread-result hook reaps stale running jobs on UserPromptSubmit", () => {
     const testEnv = createHookEnvironment();
 
     try {
-      writeStateJob(testEnv, "queued-hook-job", {
-        id: "queued-hook-job",
-        status: "queued",
+      writeStateJob(testEnv, "stale-running-job", {
+        id: "stale-running-job",
+        status: "running",
         sessionId: "hook-session",
         workspaceRoot: testEnv.workspaceDir,
         createdAt: "2026-04-04T01:00:00Z",
+        startedAt: "2026-04-04T01:00:01Z",
+        pid: 99999999,
       });
 
       runHook(
-        SESSION_HOOK,
-        ["SessionEnd"],
+        UNREAD_HOOK,
+        [],
         {
+          hook_event_name: "UserPromptSubmit",
           cwd: testEnv.workspaceDir,
           session_id: "hook-session",
+          prompt: "continue",
         },
         testEnv.env
       );
 
-      const job = readStateJob(testEnv, "queued-hook-job");
-      assert.equal(job.status, "cancelled");
-      assert.equal(job.phase, "cancelled");
+      const job = readStateJob(testEnv, "stale-running-job");
+      assert.equal(job.status, "failed");
+      assert.equal(job.phase, "failed");
       assert.equal(job.pid, null);
-      assert.match(job.errorMessage ?? "", /session ended/i);
+      assert.match(job.errorMessage ?? "", /Auto-reaped/i);
+      assert.equal(readCurrentSessionMarker(testEnv).sessionId, "hook-session");
     } finally {
       cleanupHookEnvironment(testEnv);
     }
   });
 
-  it("session lifecycle hook refuses to kill a stored PID without a matching identity", () => {
+  it("unread-result hook does not cancel live jobs during UserPromptSubmit", () => {
     const testEnv = createHookEnvironment();
 
     try {
-      writeStateJob(testEnv, "untrusted-running-job", {
-        id: "untrusted-running-job",
+      writeStateJob(testEnv, "live-running-job", {
+        id: "live-running-job",
         status: "running",
         sessionId: "hook-session",
         workspaceRoot: testEnv.workspaceDir,
@@ -467,20 +614,20 @@ describe("hooks", () => {
       });
 
       runHook(
-        SESSION_HOOK,
-        ["SessionEnd"],
+        UNREAD_HOOK,
+        [],
         {
+          hook_event_name: "UserPromptSubmit",
           cwd: testEnv.workspaceDir,
           session_id: "hook-session",
+          prompt: "continue",
         },
         testEnv.env
       );
 
-      const job = readStateJob(testEnv, "untrusted-running-job");
-      assert.equal(job.status, "cancel_failed");
-      assert.equal(job.phase, "cancel_failed");
+      const job = readStateJob(testEnv, "live-running-job");
+      assert.equal(job.status, "running");
       assert.equal(job.pid, process.pid);
-      assert.match(job.errorMessage ?? "", /without a matching PID identity/i);
     } finally {
       cleanupHookEnvironment(testEnv);
     }
@@ -658,6 +805,49 @@ describe("hooks", () => {
     }
   });
 
+  it("stop-review hook caps emitted block reasons while preserving raw output", () => {
+    const testEnv = createHookEnvironment();
+
+    try {
+      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, "config.json"),
+        JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
+        "utf8"
+      );
+
+      const result = runHook(
+        STOP_HOOK,
+        [],
+        {
+          cwd: testEnv.workspaceDir,
+          session_id: "hook-session",
+          last_assistant_message: "review me",
+        },
+        {
+          ...testEnv.env,
+          CLAUDE_LONG_BLOCK_RESULT: "1",
+        }
+      );
+
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.decision, "block");
+      assert.ok(
+        payload.reason.length <= 1_600,
+        `expected bounded reason, got ${payload.reason.length} chars`
+      );
+      assert.match(payload.reason, /Full stop-review output was saved/);
+
+      const snapshot = readStopReviewSnapshot(testEnv);
+      assert.equal(snapshot.status, "blocked");
+      assert.ok(snapshot.reason.length > payload.reason.length);
+      assert.equal(snapshot.rawOutput, `BLOCK: ${"x".repeat(3000)}`);
+    } finally {
+      cleanupHookEnvironment(testEnv);
+    }
+  });
+
   it("stop-review hook accepts an ALLOW contract after streamed prefix chatter", () => {
     const testEnv = createHookEnvironment();
 
@@ -798,103 +988,4 @@ describe("hooks", () => {
     }
   });
 
-  it("session lifecycle hook falls back to the current-session marker on SessionEnd", () => {
-    const testEnv = createHookEnvironment();
-
-    try {
-      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
-      fs.mkdirSync(stateDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(stateDir, "current-session.json"),
-        JSON.stringify(
-          { sessionId: "hook-session", updatedAt: "2026-04-04T01:00:00Z" },
-          null,
-          2
-        ) + "\n",
-        "utf8"
-      );
-      writeStateJob(testEnv, "queued-hook-job", {
-        id: "queued-hook-job",
-        status: "queued",
-        sessionId: "hook-session",
-        workspaceRoot: testEnv.workspaceDir,
-        createdAt: "2026-04-04T01:00:00Z",
-      });
-
-      runHook(
-        SESSION_HOOK,
-        ["SessionEnd"],
-        {
-          cwd: testEnv.workspaceDir,
-        },
-        testEnv.env
-      );
-
-      const job = readStateJob(testEnv, "queued-hook-job");
-      assert.equal(job.status, "cancelled");
-      assert.ok(
-        !fs.existsSync(path.join(stateDir, "current-session.json")),
-        "SessionEnd fallback should clear the current-session marker"
-      );
-    } finally {
-      cleanupHookEnvironment(testEnv);
-    }
-  });
-
-  it("session lifecycle hook ignores fallback lookup errors on SessionEnd", () => {
-    const testEnv = createHookEnvironment();
-
-    try {
-      const missingDir = path.join(testEnv.rootDir, "missing-workspace");
-      const result = runHook(
-        SESSION_HOOK,
-        ["SessionEnd"],
-        {
-          cwd: missingDir,
-        },
-        testEnv.env
-      );
-
-      assert.equal(result.stdout.trim(), "");
-      assert.equal(result.stderr.trim(), "");
-    } finally {
-      cleanupHookEnvironment(testEnv);
-    }
-  });
-
-  it("nested SessionEnd does not cancel jobs owned by the parent session", () => {
-    const testEnv = createHookEnvironment();
-
-    try {
-      writeStateJob(testEnv, "parent-owned-job", {
-        id: "parent-owned-job",
-        status: "running",
-        sessionId: "parent-session",
-        workspaceRoot: testEnv.workspaceDir,
-        createdAt: "2026-04-04T01:00:00Z",
-        startedAt: "2026-04-04T01:00:01Z",
-        pid: 999999,
-      });
-
-      runHook(
-        SESSION_HOOK,
-        ["SessionEnd"],
-        {
-          cwd: testEnv.workspaceDir,
-          session_id: "child-session",
-        },
-        {
-          ...testEnv.env,
-          [SESSION_ID_ENV]: "parent-session",
-        }
-      );
-
-      const job = readStateJob(testEnv, "parent-owned-job");
-      assert.equal(job.status, "running");
-      assert.equal(job.sessionId, "parent-session");
-      assert.equal(job.pid, 999999);
-    } finally {
-      cleanupHookEnvironment(testEnv);
-    }
-  });
 });

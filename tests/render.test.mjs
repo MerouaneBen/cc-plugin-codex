@@ -173,12 +173,26 @@ describe("renderSetupReport", () => {
     assert.ok(output.includes("- hook trust: trusted 3 native plugin hooks"));
   });
 
+  it("includes plugin state details when present", () => {
+    const output = renderSetupReport({
+      ...baseReport,
+      pluginState: { ready: false, detail: "restart required" },
+    });
+    assert.ok(output.includes("- plugin state: restart required"));
+  });
+
   it("shows review gate status", () => {
     const enabled = renderSetupReport({ ...baseReport, reviewGateEnabled: true });
     assert.ok(enabled.includes("review gate: enabled"));
 
     const disabled = renderSetupReport(baseReport);
     assert.ok(disabled.includes("review gate: disabled"));
+
+    const pendingRestart = renderSetupReport({
+      ...baseReport,
+      reviewGateEnabled: null,
+    });
+    assert.ok(pendingRestart.includes("review gate: check after restart"));
   });
 
   it("includes actions taken", () => {

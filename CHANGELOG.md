@@ -1,9 +1,14 @@
 # Changelog
 
-## Unreleased
+## v1.3.0
 
-- Send Claude prompts through stdin instead of command-line arguments so large working-tree reviews no longer fail with `spawn ENAMETOOLONG` on Windows, and fail closed if prompt delivery itself errors.
-- Resolve native `claude.exe` shims and npm-packaged executables from the active Windows `PATH`, npm prefix, or `APPDATA`, while retaining an explicit `CC_PLUGIN_CODEX_CLAUDE_BIN` override.
+- Preserve the originating workspace when reserved background job ids pass through built-in rescue, review, and adversarial-review forwarding children.
+- Store plugin state under Codex's injected marketplace-qualified `PLUGIN_DATA` root, migrate the legacy `cc` and `claude-code` namespaces, and configure the destination plus migration roots for sandboxed writes. Existing sessions receive explicit restart-and-rerun guidance before review-gate changes continue, and uninstall removes the plugin-specific writable-root grants.
+- Harden the turn-end review gate with the bundled read-only git MCP server, Claude-compatible Draft-07 structured output, and bounded inline block reasons while preserving full diagnostics in snapshots.
+- Remove the non-dispatched `SessionEnd` hook and reap stale background jobs safely during `UserPromptSubmit` without cancelling live work.
+- Send Claude prompts through stdin and resolve native Windows/npm Claude executables, including working-tree reviews larger than the Windows command-line limit.
+- Bound aggregate untracked review context and retain detached worker diagnostics in managed job logs.
+- Refresh marketplace installation guidance, repository agent instructions, GitHub Actions, TypeScript, ESLint, Node type definitions, and runtime globals.
 
 ## v1.2.1
 
