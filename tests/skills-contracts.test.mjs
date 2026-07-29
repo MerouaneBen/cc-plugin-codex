@@ -16,7 +16,7 @@ function read(relativePath) {
   return fs.readFileSync(path.join(PROJECT_ROOT, relativePath), "utf8");
 }
 
-test("public model contracts document native Fable support", () => {
+test("public model contracts document native Fable support and alias effort policy", () => {
   const contracts = [
     "README.md",
     "skills/review/SKILL.md",
@@ -28,8 +28,56 @@ test("public model contracts document native Fable support", () => {
   for (const contractPath of contracts) {
     const contract = read(contractPath);
     assert.match(contract, /fable/i, `${contractPath} must document Fable`);
-    assert.match(contract, /fable[^\n]*high|high[^\n]*fable/i, `${contractPath} must document Fable's high default effort`);
+    for (const alias of ["fable", "opus", "sonnet", "haiku"]) {
+      assert.match(
+        contract,
+        new RegExp(`${alias}[^\\n]*high|high[^\\n]*${alias}`, "i"),
+        `${contractPath} must document ${alias}'s high default effort`
+      );
+    }
   }
+});
+
+test("model contracts delegate discovery and alias resolution to Claude Code", () => {
+  const contracts = [
+    "README.md",
+    "skills/review/SKILL.md",
+    "skills/adversarial-review/SKILL.md",
+    "skills/rescue/SKILL.md",
+    "internal-skills/cli-runtime/runtime.md",
+  ];
+
+  for (const contractPath of contracts) {
+    const contract = read(contractPath);
+    assert.match(contract, /\/model/i, `${contractPath} must point to Claude Code model discovery`);
+    assert.match(
+      contract,
+      /friendly aliases?[^\n]*lowercase/i,
+      `${contractPath} must document friendly alias canonicalization`
+    );
+    assert.match(
+      contract,
+      /every other `--model` value[^\n]*unchanged/i,
+      `${contractPath} must preserve non-friendly model values`
+    );
+  }
+
+  for (const contractPath of contracts.filter((contractPath) => contractPath !== "README.md")) {
+    const contract = read(contractPath);
+    assert.match(
+      contract,
+      /Forward (?:an explicit )?`--model`(?: value)? unchanged to the companion/i,
+      `${contractPath} must preserve the user's model value until the companion boundary`
+    );
+  }
+
+  const implementation = [
+    read("scripts/claude-companion.mjs"),
+    read("scripts/lib/claude-cli.mjs"),
+  ].join("\n");
+  assert.doesNotMatch(implementation, /MODEL_ALIASES/);
+  assert.doesNotMatch(implementation, /claude-(?:opus|sonnet|haiku)-\d/);
+  assert.doesNotMatch(implementation, /\[1m\]/);
 });
 
 test("built-in child commands preserve the workspace for reserved job ids", () => {

@@ -942,7 +942,7 @@ describe("claude-companion integration", () => {
       const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
       assert.equal(args[0], "-p");
       assert.ok(args.includes("--model"));
-      assert.equal(args[args.indexOf("--model") + 1], "claude-haiku-4-5");
+      assert.equal(args[args.indexOf("--model") + 1], "haiku");
       assert.ok(args.includes("--effort"));
       assert.equal(args[args.indexOf("--effort") + 1], "high");
       assert.ok(args.includes("--permission-mode"));
@@ -954,7 +954,41 @@ describe("claude-companion integration", () => {
     }
   });
 
-  it("passes native Fable with high default effort through task and review flows", () => {
+  it("defaults every friendly model alias to high effort", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      for (const alias of ["fable", "opus", "sonnet", "haiku"]) {
+        const argsFile = path.join(testEnv.rootDir, `${alias}-default-effort-args.json`);
+        const requestedAlias = alias.toUpperCase();
+        runCompanion(
+          [
+            "task",
+            "--cwd",
+            testEnv.workspaceDir,
+            "--model",
+            requestedAlias,
+            "--quiet-progress",
+            `${alias} default effort delay=20`,
+          ],
+          {
+            env: {
+              ...testEnv.env,
+              CLAUDE_ARGS_FILE: argsFile,
+            },
+          }
+        );
+
+        const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
+        assert.equal(args[args.indexOf("--model") + 1], alias);
+        assert.equal(args[args.indexOf("--effort") + 1], "high");
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("canonicalizes native Fable with high default effort through task and review flows", () => {
     const testEnv = createTestEnvironment();
 
     try {
@@ -965,7 +999,7 @@ describe("claude-companion integration", () => {
           "--cwd",
           testEnv.workspaceDir,
           "--model",
-          "fable",
+          "FaBlE",
           "--quiet-progress",
           "fable task delay=20",
         ],
@@ -997,7 +1031,7 @@ describe("claude-companion integration", () => {
             "--scope",
             "working-tree",
             "--model",
-            "fable",
+            "FaBlE",
             ...focusText,
           ],
           {
@@ -1117,7 +1151,7 @@ describe("claude-companion integration", () => {
       );
       assert.equal(
         reviewInvocation.args[reviewInvocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.match(reviewInvocation.prompt, /working tree diff/i);
       assert.match(reviewResult.stdout, /Claude Code Review/);
@@ -1211,7 +1245,7 @@ describe("claude-companion integration", () => {
       const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8"));
       assert.equal(
         invocation.args[invocation.args.indexOf("--model") + 1],
-        "claude-haiku-4-5"
+        "haiku"
       );
       assert.match(invocation.prompt, /focus on command injection/i);
       assert.match(result.stdout, /Adversarial Review/);
