@@ -471,6 +471,8 @@ describe("renderJobStatusReport", () => {
     const job = {
       id: "j1",
       status: "completed",
+      routingState: "launched",
+      launchReceipt: "launch-0123456789abcdef",
       phase: "done",
       kindLabel: "review",
       title: "Review",
@@ -487,6 +489,8 @@ describe("renderJobStatusReport", () => {
     assert.ok(output.includes("| Job | `j1` |"));
     assert.ok(output.includes("| Kind | review |"));
     assert.ok(output.includes("| Title | Review |"));
+    assert.ok(output.includes("| Routing state | launched |"));
+    assert.ok(output.includes("| Launch receipt | launch-0123456789abcdef |"));
     assert.ok(output.includes("| Started | 2026-04-02T19:00:00.000Z |"));
     assert.ok(output.includes("| Ended | 2026-04-02T19:01:00.000Z |"));
     assert.ok(output.includes("| Duration | 1m |"));

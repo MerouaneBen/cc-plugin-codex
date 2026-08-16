@@ -12,6 +12,7 @@
 import fs from "node:fs";
 
 import {
+  ACTIVE_JOB_STATUSES,
   getConfig,
   getCurrentSession,
   listJobs,
@@ -86,7 +87,7 @@ function formatElapsedDuration(startValue, endValue = null) {
   return `${seconds}s`;
 }
 
-const ACTIVE_STATUSES = new Set(["running", "cancelling"]);
+const ACTIVE_STATUSES = ACTIVE_JOB_STATUSES;
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "cancel_failed", "unknown"]);
 
 function inferJobPhase(job, progressPreview = []) {

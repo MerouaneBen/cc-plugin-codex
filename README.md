@@ -233,11 +233,12 @@ All review and rescue commands support `--background`. Background jobs are track
 
 1. **Queued → Running → Completed** — jobs progress through states automatically.
 2. **Built-in subagent background flows** — background rescue, review, and adversarial review use Codex-managed subagent turns rather than stuffing `--background` into the companion command itself.
-3. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
+3. **Fail-closed launch tracking** — the reservation appears immediately as a queued job, but Codex reports only that forwarding is queued and launch is not yet verified. The child records `routingState: launched` plus a launch receipt when the companion really starts; missing launchers, missing agent ids, and bounded launch timeouts become stored failed jobs instead of optimistic success messages.
+4. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
    The nudge is intentionally just a pointer. The actual stored result still opens through `$cc:result`.
-4. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
-5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
-6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
+5. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
+6. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
+7. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
 
 **Typical background flow:**
 
@@ -250,7 +251,7 @@ $cc:result task-abc123
 
 ### What “background” means here
 
-- The parent Codex thread does not wait.
+- The parent Codex thread does not wait for task completion and does not claim immediate launch success. Use `$cc:status <job-id>` to distinguish queued forwarding, a launched companion job, and a failed launch.
 - The Claude companion command still runs in the foreground inside its own worker/subagent thread.
 - For rescue and background review flows, the plugin prefers Codex built-in subagents and only uses job polling/status commands as the durable backstop.
 

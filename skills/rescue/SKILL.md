@@ -76,6 +76,13 @@ Subagent launch:
 - If it returns an empty `ownerSessionId`, omit `--owner-session-id` entirely. Never leave an empty routing placeholder such as `--owner-session-id  --job-id`.
 - If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
 - Whenever forwarding that reserved `--job-id`, also pass `--cwd <workspace-root>` using `workspaceRoot` from the same helper response. Reserved job ids are workspace-scoped.
+- For background rescue, require an actual `spawn_agent` tool call and a non-empty agent id. Assistant intent or prose is not evidence that the forwarding child was accepted.
+- If `spawn_agent` is unavailable, do not claim that rescue started. Materialize the reserved job as failed by running:
+  `node "<plugin-root>/scripts/claude-companion.mjs" background-launch-abort --job-id <reserved-job-id> --reason spawn-agent-unavailable --cwd <workspace-root> --json`
+- If the tool call fails, use reason `spawn-agent-failed`; if it returns no agent id, use reason `spawn-agent-no-id`. Surface that failure and stop.
+- A successful asynchronous `spawn_agent` ends the parent turn before the child necessarily materializes the companion job. Do not call rescue started from the tool result alone.
+- The reserved job is immediately visible as `queued`. The child changes `routingState` to `launched` and stores a non-empty `launchReceipt` when the companion command really starts. An unmaterialized reservation becomes `failed` with `launch-timeout` after the bounded launch deadline.
+- Treat `$cc:status <reserved-job-id>` as the durable authority. Only status `running` or `completed` together with routing state `launched` and a non-empty launch receipt proves that Claude Code started.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
   - Foreground rescue must add `--view-state on-success`
   - Background rescue must add `--view-state defer`
@@ -152,10 +159,10 @@ Subagent launch:
 
 Execution:
 - Foreground: spawn the rescue subagent, wait for it to finish, and return its stdout.
-- Background: spawn the rescue subagent without waiting for it in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's wait behavior.
+- Background: spawn the rescue subagent and do not wait for task completion or claim immediate launch success in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's completion-wait behavior.
 - Default background notify: when the parent thread id was captured successfully, the background built-in child may wake the parent with one synthetic follow-up turn after success.
 
 Output:
 - Foreground: return the subagent's companion stdout exactly as-is. Do not paraphrase, summarize, or add commentary before or after it.
-- Background: do not wait for the subagent output. After launching it, tell the user `Claude Code rescue started in the background. Check the subagent session or $cc:status for progress, and once it's done, we will let you know to see the results.`
+- Background: do not wait for the subagent output. After `spawn_agent` accepts the child, tell the user `Claude Code rescue forwarding is queued as <job-id>; launch is not yet verified. Check $cc:status <job-id>.`
 - If the companion reports missing setup or authentication, direct the user to `$cc:setup`.

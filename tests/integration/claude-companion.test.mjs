@@ -1653,6 +1653,195 @@ describe("claude-companion integration", () => {
       assert.equal(payload.ownerSessionId, "env-session");
       assert.equal(payload.parentThreadId, "thread-123");
       assert.match(payload.jobId, /^review-/);
+      assert.ok(fs.existsSync(reservationPathFor(testEnv, payload.jobId)));
+      const queuedJob = readStoredJobById(testEnv, payload.jobId);
+      assert.equal(queuedJob.status, "queued");
+      assert.equal(queuedJob.routingState, "reserved");
+      assert.match(queuedJob.launchDeadlineAt, /^\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("records a failed job when the parent cannot spawn a forwarding agent", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const aborted = runCompanionJson(
+        [
+          "background-launch-abort",
+          "--job-id",
+          routing.jobId,
+          "--reason",
+          "spawn-agent-unavailable",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.equal(aborted.ok, false);
+      assert.equal(aborted.job.id, routing.jobId);
+      assert.equal(aborted.job.status, "failed");
+      assert.equal(aborted.job.routingState, "failed");
+      assert.equal(aborted.job.routingFailureReason, "spawn-agent-unavailable");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+
+      const status = runCompanionJson(
+        ["status", routing.jobId, "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.equal(status.job.status, "failed");
+      const result = runCompanionJson(
+        ["result", routing.jobId, "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.equal(result.state, "terminal");
+      assert.match(result.storedJob.errorMessage, /failed before Claude Code started/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("issues a launch receipt only after the forwarding child materializes the reserved job", async () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const childRun = runCompanionAsyncJson(
+        [
+          "review",
+          "--scope",
+          "working-tree",
+          "--model",
+          "haiku",
+          "--job-id",
+          routing.jobId,
+          "--cwd",
+          testEnv.workspaceDir,
+          "--view-state",
+          "defer",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+      const receipt = await runCompanionAsyncJson(
+        [
+          "background-launch-receipt",
+          "--job-id",
+          routing.jobId,
+          "--forwarding-agent-id",
+          "agent-test-123",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--timeout-ms",
+          "5000",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.equal(receipt.jobId, routing.jobId);
+      assert.equal(receipt.forwardingAgentId, "agent-test-123");
+      assert.match(receipt.launchReceipt, /^launch-[0-9a-f]{16}$/);
+      assert.ok(["running", "completed"].includes(receipt.status));
+
+      await childRun;
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(storedJob.routingState, "launched");
+      assert.equal(storedJob.forwardingAgentId, "agent-test-123");
+      assert.equal(storedJob.launchReceipt, receipt.launchReceipt);
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("fails closed when a reserved background job never materializes", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const failedReceipt = runCompanionExpectFailure(
+        [
+          "background-launch-receipt",
+          "--job-id",
+          routing.jobId,
+          "--forwarding-agent-id",
+          "agent-never-started",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--timeout-ms",
+          "25",
+          "--poll-interval-ms",
+          "10",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.match(failedReceipt.stderr, /did not materialize/i);
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.status, "failed");
+      assert.equal(storedJob.routingState, "failed");
+      assert.equal(storedJob.routingFailureReason, "launch-timeout");
+      assert.equal(storedJob.forwardingAgentId, "agent-never-started");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+
+      const lateChild = runCompanionExpectFailure(
+        [
+          "review",
+          "--scope",
+          "working-tree",
+          "--job-id",
+          routing.jobId,
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+      assert.match(lateChild.stderr, /already exists/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("includes queued jobs in the status active-job list", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      writeSessionScopedJob(testEnv, "review-queued-visible", {
+        id: "review-queued-visible",
+        kind: "review",
+        jobClass: "review",
+        title: "Queued review",
+        workspaceRoot: testEnv.workspaceDir,
+        status: "queued",
+        phase: "queued",
+        createdAt: new Date().toISOString(),
+      });
+      const status = runCompanionJson(
+        ["status", "--all", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.ok(status.running.some((job) => job.id === "review-queued-visible"));
     } finally {
       cleanupTestEnvironment(testEnv);
     }

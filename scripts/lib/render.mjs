@@ -317,6 +317,8 @@ export function renderJobStatusReport(job) {
   pushKeyValueTableRow(lines, "Kind", job.kindLabel ?? job.kind ?? "");
   pushKeyValueTableRow(lines, "Title", job.title ?? "");
   pushKeyValueTableRow(lines, "Status", job.status ?? "unknown");
+  pushKeyValueTableRow(lines, "Routing state", job.routingState ?? "");
+  pushKeyValueTableRow(lines, "Launch receipt", job.launchReceipt ?? "");
   pushKeyValueTableRow(lines, "Phase", job.phase ?? "");
   pushKeyValueTableRow(lines, "Summary", job.summary ?? "");
   pushKeyValueTableRow(lines, "Started", job.startedAt ?? "");

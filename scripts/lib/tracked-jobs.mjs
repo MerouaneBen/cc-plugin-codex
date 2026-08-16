@@ -10,10 +10,11 @@
  */
 
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import process from "node:process";
 
 import { terminateProcessTree } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, patchJob, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { nowIso, ensureStateDir, getCurrentSession, patchJob, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
@@ -219,16 +220,50 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
-  const runningRecord = {
+  const existingJob = readJobFile(job.workspaceRoot, job.id);
+  if (existingJob?.routingState === "failed") {
+    throw new Error(
+      `Claude Code job ${job.id} was already marked failed during background launch.`,
+    );
+  }
+  const runningData = {
+    ...(existingJob ?? {}),
     ...job,
-    status: "running",
+    createdAt: existingJob?.createdAt ?? job.createdAt,
     startedAt: nowIso(),
     phase: "starting",
     pid: job.pid ?? null, // Preserve queued worker PID until onSpawn replaces it
     pidIdentity: job.pidIdentity ?? null,
-    logFile: options.logFile ?? job.logFile ?? null
+    logFile: options.logFile ?? job.logFile ?? null,
+    ...(existingJob?.routingState
+      ? {
+          routingState: "launched",
+          launchReceipt:
+            existingJob.launchReceipt ?? `launch-${randomBytes(8).toString("hex")}`,
+          launchConfirmedAt: existingJob.launchConfirmedAt ?? nowIso(),
+        }
+      : {}),
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
+  delete runningData.status;
+  if (existingJob?.routingState) {
+    const launchTransition = transitionJob(
+      job.workspaceRoot,
+      job.id,
+      ["queued"],
+      "running",
+      runningData,
+    );
+    if (!launchTransition.transitioned) {
+      throw new Error(
+        `Claude Code job ${job.id} could not start after background routing reached status ${launchTransition.previousStatus}.`,
+      );
+    }
+  } else {
+    writeJobFile(job.workspaceRoot, job.id, {
+      ...runningData,
+      status: "running",
+    });
+  }
 
   // onSpawn callback: persist Claude child PID/identity at spawn time
   // Guarded by status check — only write if job is still running (cancel may have won)

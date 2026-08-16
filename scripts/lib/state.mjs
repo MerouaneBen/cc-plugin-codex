@@ -42,6 +42,7 @@ export const MAX_STOP_REVIEW_HISTORY_ENTRIES = 200;
 const REAP_GRACE_MS = 2_000;
 const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
 export const JOB_RESERVATION_SUFFIX = ".reserve";
+export const JOB_CLAIM_SUFFIX = ".claim";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const NO_SESSION_RETENTION_BUCKET = "__no-session__";
 
@@ -459,6 +460,34 @@ function isWithinReapGracePeriod(job, now = Date.now()) {
  */
 export function reapStaleJobs(cwd, jobs) {
   return jobs.map((job) => {
+    const launchDeadline = Date.parse(job.launchDeadlineAt ?? "");
+    if (
+      job.status === "queued" &&
+      ["reserved", "claimed"].includes(job.routingState) &&
+      Number.isFinite(launchDeadline) &&
+      Date.now() > launchDeadline
+    ) {
+      try {
+        transitionJob(cwd, job.id, ["queued"], "failed", {
+          errorMessage:
+            "The Codex forwarding agent did not materialize a Claude Code job before the launch timeout.",
+          routingState: "failed",
+          routingFailureReason: "launch-timeout",
+          completedAt: nowIso(),
+          phase: "failed",
+        });
+        for (const suffix of [JOB_RESERVATION_SUFFIX, JOB_CLAIM_SUFFIX]) {
+          try {
+            fs.rmSync(path.join(resolveJobsDir(cwd), `${sanitizeId(job.id, "job ID")}${suffix}`), {
+              force: true,
+            });
+          } catch {}
+        }
+        return readJobFile(cwd, job.id) ?? job;
+      } catch {
+        return job;
+      }
+    }
     if (!REAPABLE_STATUSES.has(job.status) || !job.pid) return job;
     if (isWithinReapGracePeriod(job)) return job;
 
@@ -736,7 +765,12 @@ export function cleanupOldJobs(cwd) {
   const jobsDir = resolveJobsDir(cwd);
   try {
     for (const entry of fs.readdirSync(jobsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(JOB_RESERVATION_SUFFIX)) {
+      if (
+        !entry.isFile() ||
+        ![JOB_RESERVATION_SUFFIX, JOB_CLAIM_SUFFIX].some((suffix) =>
+          entry.name.endsWith(suffix)
+        )
+      ) {
         continue;
       }
       try {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Make Codex-managed background launches fail closed. Review, adversarial-review, and rescue now expose a queued reservation immediately, avoid claiming that an asynchronous `spawn_agent` started Claude, and require the child to materialize a companion-issued launch receipt before status can prove launch. Missing launchers, missing agent ids, and bounded materialization timeouts become stored failed jobs; claimed reservation markers prevent duplicate forwarding children, queued jobs remain visible in `$cc:status`, and late children cannot overwrite a launch failure.
+
 ## v1.4.2
 
 - Refuse companion delegation from Codex threads that are themselves driven by Claude Code. The reverse-direction plugin (Claude Code → Codex) spawns a bare `codex app-server` that inherits `~/.codex`, so its headless review threads see this plugin's skills and delegated the review back to Claude Code — looping the work between the two assistants and burning minutes on `wait`-tool spins with narration in place of findings. Session hooks now stamp `hostOrigin: "claude-code"` on the current-session marker when Claude Code host env markers (`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`) reach them, and `review`, `adversarial-review`, and `task` refuse delegation from such threads with explicit instructions to perform the work directly in that thread. Interactive sessions (env session id present), background forwarding children owned by a different session, and unstamped state all stay open, so the gate fails open everywhere the loop cannot occur.

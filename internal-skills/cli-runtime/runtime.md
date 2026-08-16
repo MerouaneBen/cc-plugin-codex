@@ -7,6 +7,12 @@ The public rescue skill already resolved the active plugin root from its `SKILL.
 Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
 
+Parent-side background launch proof:
+- This forwarding worker does not manufacture its own launch acknowledgement.
+- The parent requires a non-empty forwarding-agent id from the actual `spawn_agent` tool result, but reports only that forwarding is queued and launch is not yet verified. An asynchronous spawn ends the parent turn before child materialization can be confirmed reliably.
+- The child marks the reserved job `launched` and writes a non-empty launch receipt when the companion command really starts. `$cc:status <job-id>` is the durable authority; an unmaterialized reservation becomes `failed` after the bounded launch deadline.
+- If spawning is unavailable or fails, the parent records the reserved job with `background-launch-abort` and reports failure instead of claiming that Claude started.
+
 Execution rules:
 - The rescue subagent is a forwarder, not an operator. Launch exactly one `task` command and return that stdout unchanged.
 - Prefer the helper over hand-rolled Bash, direct Claude Code CLI strings, or any other orchestration path.

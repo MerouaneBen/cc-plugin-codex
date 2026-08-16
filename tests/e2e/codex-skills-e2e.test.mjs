@@ -1784,7 +1784,21 @@ describe("Codex direct-skill E2E", () => {
       "utf8"
     );
 
-    const reservedJobId = "review-background-steer-123";
+    const routingResult = spawnSync(
+      process.execPath,
+      [
+        COMPANION_SCRIPT,
+        "background-routing-context",
+        "--kind",
+        "review",
+        "--cwd",
+        workspaceDir,
+        "--json",
+      ],
+      { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+    );
+    assert.equal(routingResult.status, 0, routingResult.stderr || routingResult.stdout);
+    const reservedJobId = JSON.parse(routingResult.stdout).jobId;
     const ownerSessionId = "parent-review-session";
     const userRequest = "$cc:review --background --scope working-tree --model haiku";
     const notificationMessage =
@@ -1804,9 +1818,13 @@ describe("Codex direct-skill E2E", () => {
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
+        "Require an actual `spawn_agent` tool call and a non-empty agent id",
+        "reserved job is immediately visible as `queued`",
+        "launch is not yet verified",
+        "Treat `$cc:status <reserved-job-id>` as the durable authority",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} --cwd ${JSON.stringify(workspaceDir)}`,
       expectedChildNeedles: [
         "--view-state defer",
         "--job-id",
@@ -1830,7 +1848,7 @@ describe("Codex direct-skill E2E", () => {
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} --cwd ${JSON.stringify(workspaceDir)}`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -1856,7 +1874,22 @@ describe("Codex direct-skill E2E", () => {
       );
 
       const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.ok(
+        provider.phases.includes("child-shell") && provider.phases.includes("child-final"),
+        `missing child materialization phases: ${JSON.stringify(provider.phases)}`
+      );
       assert.equal(finalMessage, notificationMessage);
+
+      const result = spawnSync(
+        process.execPath,
+        [COMPANION_SCRIPT, "result", reservedJobId, "--cwd", workspaceDir, "--json"],
+        { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const stored = JSON.parse(result.stdout).storedJob;
+      assert.equal(stored.status, "completed");
+      assert.equal(stored.routingState, "launched");
+      assert.match(stored.launchReceipt ?? "", /^launch-[0-9a-f]{16}$/);
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);

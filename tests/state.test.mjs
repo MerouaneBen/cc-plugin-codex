@@ -829,23 +829,30 @@ describe("cleanupOldJobs", () => {
     }
   });
 
-  it("removes stale reserved job marker files", () => {
+  it("removes stale reserved and claimed job marker files", () => {
     const repoDir = createTempGitRepo();
     try {
       const jobsDir = resolveJobsDir(repoDir);
       fs.mkdirSync(jobsDir, { recursive: true });
       const staleReservation = path.join(jobsDir, "review-stale.reserve");
       const freshReservation = path.join(jobsDir, "review-fresh.reserve");
+      const staleClaim = path.join(jobsDir, "review-stale.claim");
+      const freshClaim = path.join(jobsDir, "review-fresh.claim");
       fs.writeFileSync(staleReservation, "{}", "utf8");
       fs.writeFileSync(freshReservation, "{}", "utf8");
+      fs.writeFileSync(staleClaim, "{}", "utf8");
+      fs.writeFileSync(freshClaim, "{}", "utf8");
 
       const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
       fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
+      fs.utimesSync(staleClaim, twoHoursAgo / 1000, twoHoursAgo / 1000);
 
       cleanupOldJobs(repoDir);
 
       assert.equal(fs.existsSync(staleReservation), false);
       assert.equal(fs.existsSync(freshReservation), true);
+      assert.equal(fs.existsSync(staleClaim), false);
+      assert.equal(fs.existsSync(freshClaim), true);
     } finally {
       fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
@@ -944,6 +951,32 @@ describe("reapStaleJobs", () => {
     assert.equal(result[0].pid, null);
     assert.equal(result[0].pidIdentity, null);
     assert.ok(result[0].completedAt);
+  });
+
+  it("fails an unmaterialized background reservation after its launch deadline", () => {
+    const id = "test-reap-routing-timeout";
+    const jobsDir = resolveJobsDir(PROJECT_CWD);
+    const reservationPath = path.join(jobsDir, `${id}.reserve`);
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      kind: "review",
+      status: "queued",
+      phase: "queued",
+      routingState: "reserved",
+      launchDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: nowIso(),
+    });
+    fs.writeFileSync(reservationPath, JSON.stringify({ jobId: id }), "utf8");
+
+    const jobs = listJobs(PROJECT_CWD);
+    const found = jobs.find((job) => job.id === id);
+
+    assert.ok(found);
+    assert.equal(found.status, "failed");
+    assert.equal(found.routingState, "failed");
+    assert.equal(found.routingFailureReason, "launch-timeout");
+    assert.match(found.errorMessage, /did not materialize/i);
+    assert.equal(fs.existsSync(reservationPath), false);
   });
 
   it("does not touch running job with alive PID", () => {
