@@ -1128,6 +1128,87 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("resumes through a claimed background reservation after the original launch deadline", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-delayed-background-resume",
+    };
+
+    try {
+      runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+          "delayed-resume-seed delay=20",
+        ],
+        { env: sessionEnv }
+      );
+
+      const routing = runCompanionJson(
+        [
+          "background-routing-context",
+          "--kind",
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: sessionEnv }
+      );
+      const reservedJob = readStoredJobById(testEnv, routing.jobId);
+      const jobPath = path.join(
+        stateDirFor(testEnv),
+        "jobs",
+        `${routing.jobId}.json`
+      );
+      fs.writeFileSync(
+        jobPath,
+        `${JSON.stringify(
+          {
+            ...reservedJob,
+            launchDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+          },
+          null,
+          2
+        )}\n`,
+        "utf8"
+      );
+
+      const resumeArgsFile = path.join(testEnv.rootDir, "delayed-resume-args.json");
+      runCompanionJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--resume",
+          "--quiet-progress",
+          "--job-id",
+          routing.jobId,
+          "--json",
+          "delayed-resume-follow-up delay=20",
+        ],
+        {
+          env: {
+            ...sessionEnv,
+            CLAUDE_ARGS_FILE: resumeArgsFile,
+          },
+        }
+      );
+
+      const resumeArgs = JSON.parse(fs.readFileSync(resumeArgsFile, "utf8"));
+      assert.ok(resumeArgs.includes("--resume"));
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(storedJob.routingState, "launched");
+      assert.equal(storedJob.launchDeadlineAt, null);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("forwards review model and honors explicit target selection inputs", () => {
     const testEnv = createTestEnvironment();
 

@@ -1641,7 +1641,9 @@ async function handleTask(argv) {
     // Resolve resume session inside the reservation guard so failures do not leak markers.
     let resumeSessionId = null;
     if (resumeLast) {
-      resumeSessionId = await resolveLatestResumableSession(workspaceRoot);
+      resumeSessionId = await resolveLatestResumableSession(workspaceRoot, {
+        excludeJobId: explicitJobId,
+      });
       if (!resumeSessionId) {
         throw new Error(
           "No previous Claude Code task session was found for this repository."

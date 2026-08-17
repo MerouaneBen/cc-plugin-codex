@@ -21,8 +21,12 @@ import {
   writeJobFile,
 } from "./state.mjs";
 
-export const DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS = 5_000;
+export const DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS = 60_000;
 export const DEFAULT_BACKGROUND_LAUNCH_POLL_INTERVAL_MS = 50;
+export const BACKGROUND_LAUNCH_TIMEOUT_ENV = "CC_PLUGIN_BACKGROUND_LAUNCH_TIMEOUT_MS";
+
+const MIN_BACKGROUND_LAUNCH_TIMEOUT_MS = 1_000;
+const MAX_BACKGROUND_LAUNCH_TIMEOUT_MS = 15 * 60_000;
 
 const SUCCESSFUL_LAUNCH_STATUSES = new Set(["queued", "running", "completed"]);
 const ABORT_REASONS = new Set([
@@ -59,6 +63,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function resolveBackgroundLaunchTimeoutMs(value) {
+  const configuredValue = value ?? process.env[BACKGROUND_LAUNCH_TIMEOUT_ENV];
+  if (configuredValue == null || String(configuredValue).trim() === "") {
+    return DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS;
+  }
+  const parsed = Number(configuredValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS;
+  }
+  return Math.min(
+    MAX_BACKGROUND_LAUNCH_TIMEOUT_MS,
+    Math.max(MIN_BACKGROUND_LAUNCH_TIMEOUT_MS, Math.trunc(parsed)),
+  );
+}
+
 function resolveMarkerFile(workspaceRoot, jobId, suffix) {
   const safeJobId = sanitizeId(jobId, "job ID");
   return path.join(resolveJobsDir(workspaceRoot), `${safeJobId}${suffix}`);
@@ -91,6 +110,7 @@ export function reserveBackgroundJobId(workspaceRoot, options) {
   const prefix = sanitizeId(options.prefix, "job prefix");
   const label = options.label ?? prefix;
   const jobsDir = resolveJobsDir(workspaceRoot);
+  const launchTimeoutMs = resolveBackgroundLaunchTimeoutMs(options.launchTimeoutMs);
   fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -130,7 +150,7 @@ export function reserveBackgroundJobId(workspaceRoot, options) {
           phase: "queued",
           routingState: "reserved",
           launchDeadlineAt: new Date(
-            Date.now() + DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS,
+            Date.now() + launchTimeoutMs,
           ).toISOString(),
           ...(payload.ownerSessionId ? { sessionId: payload.ownerSessionId } : {}),
           ...(payload.parentThreadId ? { parentThreadId: payload.parentThreadId } : {}),
@@ -151,7 +171,7 @@ export function reserveBackgroundJobId(workspaceRoot, options) {
   throw new Error(`Failed to reserve a unique Claude Code ${label} job id.`);
 }
 
-export function claimBackgroundJobId(workspaceRoot, jobId) {
+export function claimBackgroundJobId(workspaceRoot, jobId, options = {}) {
   const safeJobId = sanitizeId(jobId, "job ID");
   const existingJob = readJobFile(workspaceRoot, safeJobId);
   const isRoutingPlaceholder =
@@ -183,9 +203,14 @@ export function claimBackgroundJobId(workspaceRoot, jobId) {
     } catch {}
     throw new Error(`Claude Code job id ${safeJobId} has an invalid reservation.`);
   }
+  const routingClaimedAt = nowIso();
+  const launchTimeoutMs = resolveBackgroundLaunchTimeoutMs(options.launchTimeoutMs);
   patchJob(workspaceRoot, safeJobId, {
     routingState: "claimed",
-    routingClaimedAt: nowIso(),
+    routingClaimedAt,
+    launchDeadlineAt: new Date(
+      Date.parse(routingClaimedAt) + launchTimeoutMs,
+    ).toISOString(),
   });
   return marker;
 }
@@ -263,10 +288,9 @@ export function abortBackgroundLaunch(workspaceRoot, jobId, options = {}) {
 export async function waitForBackgroundLaunchReceipt(workspaceRoot, jobId, options = {}) {
   const safeJobId = sanitizeId(jobId, "job ID");
   const forwardingAgentId = sanitizeId(options.forwardingAgentId, "forwarding agent ID");
-  const timeoutMs = Math.max(
-    1,
-    Number(options.timeoutMs) || DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS,
-  );
+  const timeoutMs = options.timeoutMs == null
+    ? resolveBackgroundLaunchTimeoutMs()
+    : Math.max(1, Number(options.timeoutMs) || DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS);
   const pollIntervalMs = Math.max(
     10,
     Number(options.pollIntervalMs) || DEFAULT_BACKGROUND_LAUNCH_POLL_INTERVAL_MS,

@@ -261,6 +261,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     ...(existingJob?.routingState
       ? {
           routingState: "launched",
+          launchDeadlineAt: null,
           launchReceipt:
             existingJob.launchReceipt ?? `launch-${randomBytes(8).toString("hex")}`,
           launchConfirmedAt: existingJob.launchConfirmedAt ?? nowIso(),

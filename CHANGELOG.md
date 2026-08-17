@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v1.4.7
+
+- Prevent delayed Codex forwarding children from reaping their own background reservation during `--resume`. Background launch reservations now use a configurable 60-second default, claiming a reservation refreshes its materialization deadline, resume lookup excludes the routing job being launched, and successful materialization clears the deadline.
+
 ## v1.4.6
 
 - Dissociate linked-worktree review clones from the source repository after their fast local creation. The temporary review repository now owns its object data and cannot lose objects if the source repository prunes unreachable commits during a long review.
