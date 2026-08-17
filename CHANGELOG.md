@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v1.4.5
+
+- Keep branch and adversarial reviews working when Codex itself runs from a linked git worktree. The review runtime now detects that topology and creates its isolated checkout as a shared read-only clone under plugin runtime data, avoiding writes to the source repository's common `.git/worktrees` directory that the Codex sandbox correctly blocks.
+
 ## v1.4.4
 
 - Make rescue, review, and adversarial-review compatible with Codex hosts whose approval policy is `Never`. The forwarding contract now omits `sandbox_permissions` when host network is already enabled, keeps targeted escalation for network-restricted hosts that permit it, and fails before launch with `network-unavailable-no-escalation` when neither path is available. Durable routing also preserves `sandbox-escalation-forbidden` and `forwarder-exec-rejected` instead of normalizing those known failures to `launch-receipt-failed`.

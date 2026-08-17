@@ -49,6 +49,31 @@ function makeWorktreePath(label) {
   );
 }
 
+function resolveGitDirectory(repoRoot, flag) {
+  const result = runGit(repoRoot, ["rev-parse", flag]);
+  if (result.status !== 0) {
+    throw new Error(
+      `git rev-parse ${flag} failed: ${(result.stderr ?? "").trim() || "unknown error"}`
+    );
+  }
+  const reported = result.stdout.trim();
+  const absolute = path.isAbsolute(reported)
+    ? reported
+    : path.resolve(repoRoot, reported);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    return path.resolve(absolute);
+  }
+}
+
+export function isLinkedGitWorktree(repoRoot) {
+  return (
+    resolveGitDirectory(repoRoot, "--git-dir") !==
+    resolveGitDirectory(repoRoot, "--git-common-dir")
+  );
+}
+
 /**
  * Resolve the canonical git ref to materialize for a review. We default to HEAD
  * (the branch tip); callers may pass a specific ref (branch review) or "HEAD" to
@@ -103,7 +128,49 @@ export function createReviewWorktree(repoRoot, { label = "review", ref = "HEAD" 
     safeRemoveWorktree(repoRoot, worktreePath);
   };
 
-  return { path: worktreePath, commit, cleanup };
+  return { path: worktreePath, commit, cleanup, strategy: "worktree" };
+}
+
+/**
+ * Materialize a branch review without registering another worktree in the
+ * source repository's common git directory. This is required when Codex is
+ * itself running from a linked worktree: the host sandbox can write the
+ * current worktree and plugin data, but not the source checkout's `.git`.
+ */
+export function createReviewClone(repoRoot, { label = "review", ref = "HEAD" } = {}) {
+  const commit = resolveBaseRef(repoRoot, ref);
+  const clonePath = makeWorktreePath(label);
+  const cloned = runGit(repoRoot, [
+    "clone",
+    "--shared",
+    "--no-checkout",
+    "--quiet",
+    repoRoot,
+    clonePath,
+  ]);
+  if (cloned.status !== 0) {
+    cleanupWorktreeDir(clonePath);
+    throw new Error(
+      `git clone for review isolation failed: ${(cloned.stderr ?? "").trim() || "unknown error"}`
+    );
+  }
+
+  const checkedOut = runGit(clonePath, ["checkout", "--detach", "--quiet", commit]);
+  if (checkedOut.status !== 0) {
+    cleanupWorktreeDir(clonePath);
+    throw new Error(
+      `git checkout for review isolation failed: ${(checkedOut.stderr ?? "").trim() || "unknown error"}`
+    );
+  }
+
+  let removed = false;
+  const cleanup = () => {
+    if (removed) return;
+    removed = true;
+    cleanupWorktreeDir(clonePath);
+  };
+
+  return { path: clonePath, commit, cleanup, strategy: "clone" };
 }
 
 function safeRemoveWorktree(repoRoot, worktreePath) {
@@ -148,14 +215,18 @@ export function createReviewIsolation(repoRoot, target, { label = "review" } = {
       gitRoot: repoRoot,
       cleanup: () => {},
       isolated: false,
+      strategy: "original",
     };
   }
-  const worktree = createReviewWorktree(repoRoot, { label });
+  const worktree = isLinkedGitWorktree(repoRoot)
+    ? createReviewClone(repoRoot, { label })
+    : createReviewWorktree(repoRoot, { label });
   return {
     cwd: worktree.path,
     gitRoot: worktree.path,
     cleanup: () => worktree.cleanup(),
     isolated: true,
+    strategy: worktree.strategy,
   };
 }
 
@@ -182,6 +253,11 @@ export function pruneStaleReviewWorktrees(repoRoot, { maxAgeMs = 6 * 60 * 60 * 1
       continue;
     }
     if (now - stat.mtimeMs < maxAgeMs) continue;
-    safeRemoveWorktree(repoRoot, full);
+    const gitMarker = path.join(full, ".git");
+    if (fs.existsSync(gitMarker) && fs.statSync(gitMarker).isDirectory()) {
+      cleanupWorktreeDir(full);
+    } else {
+      safeRemoveWorktree(repoRoot, full);
+    }
   }
 }
