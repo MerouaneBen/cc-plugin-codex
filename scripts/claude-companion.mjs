@@ -2072,20 +2072,22 @@ async function handleCancel(argv) {
     workspaceRoot,
     job.id,
     ["running", "queued"],
-    "cancelling"
+    "cancelling",
+    { phase: "cancelling" },
   );
   if (!transition.transitioned) {
+    const currentStatus = transition.job?.status ?? job.status;
     outputCommandResult(
-      { jobId: job.id, status: job.status },
-      `Job ${job.id} is already ${job.status}.\n`,
+      { jobId: job.id, status: currentStatus },
+      `Job ${job.id} is already ${currentStatus}.\n`,
       options.json
     );
     return;
   }
 
   // Cancel via process group kill with PID identity verification
-  const pid = existing.pid ?? job.pid;
-  const pidIdentity = existing.pidIdentity ?? null;
+  const pid = transition.job?.pid ?? existing.pid ?? job.pid;
+  const pidIdentity = transition.job?.pidIdentity ?? existing.pidIdentity ?? null;
   /** @type {{ cancelled: boolean, note?: string }} */
   let cancelResult = { cancelled: true, note: "No PID to cancel" };
   const jobLogFile = resolveJobLogFile(workspaceRoot, job.id);
@@ -2110,38 +2112,51 @@ async function handleCancel(argv) {
   // Determine final status based on actual cancellation result
   const completedAt = nowIso();
   const finalStatus = cancelResult.cancelled ? "cancelled" : "cancel_failed";
+  const routingWasPending = ["reserved", "claimed"].includes(
+    transition.job?.routingState,
+  );
+  const terminalRoutingData = {
+    launchDeadlineAt: null,
+    ...(routingWasPending ? { routingState: "cancelled" } : {}),
+  };
 
   // CAS: cancelling → cancelled/cancel_failed
+  let terminalTransition;
   if (finalStatus === "cancelled") {
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancelled", {
+    terminalTransition = transitionJob(workspaceRoot, job.id, ["cancelling"], "cancelled", {
       completedAt,
+      phase: "cancelled",
       errorMessage: "Cancelled by user.",
       pid: null,
       pidIdentity: null,
+      ...terminalRoutingData,
     });
   } else {
     // cancel_failed: PRESERVE PID/PGID for manual cleanup
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
+    terminalTransition = transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
       completedAt,
+      phase: "cancel_failed",
       errorMessage: `Cancel failed: ${cancelResult.note ?? "process group still alive"}`,
       note: cancelResult.note ?? null,
       pgid: pid, // Preserve for manual kill hint
       // Keep pid/pidIdentity for recovery
+      ...terminalRoutingData,
     });
   }
 
-  appendLogLine(jobLogFile, `Cancel result: ${finalStatus}`);
+  releaseBackgroundJobId(workspaceRoot, job.id);
+  const terminalJob = terminalTransition.job ?? readStoredJob(workspaceRoot, job.id) ?? job;
+  appendLogLine(jobLogFile, `Cancel result: ${terminalJob.status}`);
   cleanupOldJobs(workspaceRoot);
 
-  const nextJob = { ...job, status: finalStatus, phase: finalStatus };
   const payload = {
     jobId: job.id,
-    status: finalStatus,
-    title: job.title,
+    status: terminalJob.status,
+    title: terminalJob.title,
     note: cancelResult.note,
   };
 
-  outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  outputCommandResult(payload, renderCancelReport(terminalJob), options.json);
 }
 
 // ---------------------------------------------------------------------------

@@ -454,6 +454,30 @@ function isWithinReapGracePeriod(job, now = Date.now()) {
   return Number.isFinite(timestamp) && now - timestamp < REAP_GRACE_MS;
 }
 
+function removeJobRoutingMarkers(cwd, jobId) {
+  for (const suffix of [JOB_RESERVATION_SUFFIX, JOB_CLAIM_SUFFIX]) {
+    try {
+      fs.rmSync(path.join(resolveJobsDir(cwd), `${sanitizeId(jobId, "job ID")}${suffix}`), {
+        force: true,
+      });
+    } catch {}
+  }
+}
+
+function recordReaperFailure(cwd, jobId, action, error) {
+  try {
+    ensureStateDir(cwd);
+    const message = `State recovery warning (${action}): ${String(
+      error?.message ?? error
+    ).replace(/\s+/g, " ").trim()}`;
+    const logFile = resolveJobLogFile(cwd, jobId);
+    const existing = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
+    if (!existing.includes(message)) {
+      fs.appendFileSync(logFile, `[${nowIso()}] ${message}\n`, "utf8");
+    }
+  } catch {}
+}
+
 /**
  * Detect zombie jobs whose PID has died and auto-transition them to "failed".
  * Called from listJobs() so every job-reading path benefits automatically.
@@ -476,20 +500,42 @@ export function reapStaleJobs(cwd, jobs) {
           completedAt: nowIso(),
           phase: "failed",
         });
-        for (const suffix of [JOB_RESERVATION_SUFFIX, JOB_CLAIM_SUFFIX]) {
-          try {
-            fs.rmSync(path.join(resolveJobsDir(cwd), `${sanitizeId(job.id, "job ID")}${suffix}`), {
-              force: true,
-            });
-          } catch {}
-        }
+        removeJobRoutingMarkers(cwd, job.id);
         return readJobFile(cwd, job.id) ?? job;
-      } catch {
+      } catch (error) {
+        recordReaperFailure(cwd, job.id, "launch-timeout", error);
         return job;
       }
     }
-    if (!REAPABLE_STATUSES.has(job.status) || !job.pid) return job;
+    if (!REAPABLE_STATUSES.has(job.status)) return job;
     if (isWithinReapGracePeriod(job)) return job;
+
+    // A cancel command can be interrupted after its first CAS but before it
+    // persists the terminal state. Jobs without a PID (for example, a queued
+    // reservation) must not remain stuck in "cancelling" forever.
+    if (job.status === "cancelling" && !job.pid) {
+      try {
+        const transitioned = transitionJob(cwd, job.id, ["cancelling"], "cancelled", {
+          errorMessage: "Cancelled by user. Recovered an interrupted cancellation.",
+          completedAt: nowIso(),
+          pid: null,
+          pidIdentity: null,
+          phase: "cancelled",
+          launchDeadlineAt: null,
+          ...(["reserved", "claimed"].includes(job.routingState)
+            ? { routingState: "cancelled" }
+            : {}),
+        });
+        if (transitioned.transitioned) {
+          removeJobRoutingMarkers(cwd, job.id);
+        }
+        return readJobFile(cwd, job.id) ?? job;
+      } catch (error) {
+        recordReaperFailure(cwd, job.id, "interrupted-cancellation", error);
+        return job;
+      }
+    }
+    if (!job.pid) return job;
 
     // Use pidIdentity if available (PID-reuse safe), otherwise fall back to isProcessAlive
     const alive = job.pidIdentity
@@ -497,21 +543,37 @@ export function reapStaleJobs(cwd, jobs) {
       : isProcessAlive(job.pid);
     if (alive) return job;
 
-    // Process is dead — transition to failed via CAS
+    // A dead process during cancellation means cancellation reached its terminal state.
+    // Other dead active jobs failed without producing a terminal result.
     try {
-      const transitioned = transitionJob(cwd, job.id, [job.status], "failed", {
-        errorMessage: `Process ${job.pid} died without completing. Auto-reaped.`,
+      const terminalStatus = job.status === "cancelling" ? "cancelled" : "failed";
+      const transitioned = transitionJob(cwd, job.id, [job.status], terminalStatus, {
+        errorMessage: job.status === "cancelling"
+          ? "Cancelled by user. Process exited during cancellation."
+          : `Process ${job.pid} died without completing. Auto-reaped.`,
         completedAt: nowIso(),
         pid: null,
         pidIdentity: null,
-        phase: "failed",
+        phase: terminalStatus,
+        ...(terminalStatus === "cancelled"
+          ? {
+              launchDeadlineAt: null,
+              ...(["reserved", "claimed"].includes(job.routingState)
+                ? { routingState: "cancelled" }
+                : {}),
+            }
+          : {}),
       });
       if (transitioned.transitioned) {
+        if (terminalStatus === "cancelled") {
+          removeJobRoutingMarkers(cwd, job.id);
+        }
         return readJobFile(cwd, job.id) ?? job;
       }
       // CAS miss — another actor already transitioned; re-read current state
       return readJobFile(cwd, job.id) ?? job;
-    } catch {
+    } catch (error) {
+      recordReaperFailure(cwd, job.id, "dead-process", error);
       return job; // Reaper failure is non-fatal — return original
     }
   });

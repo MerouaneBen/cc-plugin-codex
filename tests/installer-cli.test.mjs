@@ -928,7 +928,11 @@ describe("installer-cli", () => {
     const result = runLocalPluginInstallerExpectFailure("install", installDir, homeDir);
 
     assert.match(result.stderr, /Local checkout installs are no longer supported/i);
-    assert.match(result.stderr, /codex marketplace add sendbird\/codex-marketplace/i);
+    assert.match(
+      result.stderr,
+      /codex plugin marketplace add MerouaneBen\/cc-plugin-codex --ref main/i
+    );
+    assert.match(result.stderr, /codex plugin add cc@merouane/i);
   });
 
   it("installs successfully when CODEX_HOME is outside the user's home directory", () => {

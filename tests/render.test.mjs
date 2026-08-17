@@ -629,7 +629,15 @@ describe("renderCancelReport", () => {
 
   it("shows manual cleanup warning for cancel_failed", () => {
     const output = renderCancelReport({ id: "j1", status: "cancel_failed", pgid: 12345 });
+    assert.ok(output.includes("Cancellation failed for j1"));
+    assert.ok(!output.includes("Cancelled j1"));
     assert.ok(output.includes("Manual cleanup"));
     assert.ok(output.includes("kill -9 -12345"));
+  });
+
+  it("does not claim success for an unexpected terminal status", () => {
+    const output = renderCancelReport({ id: "j1", status: "failed" });
+    assert.ok(output.includes("Cancellation ended with status failed for j1"));
+    assert.ok(!output.includes("Cancelled j1"));
   });
 });

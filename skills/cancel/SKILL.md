@@ -15,3 +15,5 @@ Supported arguments: `[job-id]`
 Output:
 - Present the companion stdout exactly as returned.
 - Do not add extra prose unless the command itself failed before producing output.
+- Repeating cancellation with the same explicit job ID is idempotent: report
+  the persisted terminal status without changing it.

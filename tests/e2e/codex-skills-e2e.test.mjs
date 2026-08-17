@@ -1667,6 +1667,72 @@ describe("Codex rescue-skill E2E", () => {
 });
 
 describe("Codex direct-skill E2E", () => {
+  it("routes the installed $cc:cancel skill and persists a truthful terminal result", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const workspaceDir = path.join(testEnv.rootDir, "installed-cancel-workspace");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    setupGitWorkspace(workspaceDir);
+
+    const pluginRoot = installPlugin(testEnv);
+    const companionScript = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+    const routingResult = spawnSync(
+      process.execPath,
+      [
+        companionScript,
+        "background-routing-context",
+        "--kind",
+        "review",
+        "--cwd",
+        workspaceDir,
+        "--json",
+      ],
+      { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+    );
+    assert.equal(routingResult.status, 0, routingResult.stderr || routingResult.stdout);
+    const jobId = JSON.parse(routingResult.stdout).jobId;
+
+    const userRequest = `$cc:cancel ${jobId}`;
+    const provider = startDirectSkillProvider({
+      userRequest,
+      expectedNeedles: ["Claude Code Cancel", "same explicit job ID is idempotent"],
+      shellCommands: [
+        `node ${JSON.stringify(companionScript)} cancel ${JSON.stringify(jobId)}`,
+      ],
+      cwd: workspaceDir,
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(testEnv, userRequest, { cwd: workspaceDir });
+
+      assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8");
+      assert.match(finalMessage, /# Claude Code Cancel/);
+      assert.match(finalMessage, new RegExp(`Cancelled ${jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+      const statusResult = spawnSync(
+        process.execPath,
+        [companionScript, "status", jobId, "--cwd", workspaceDir, "--json"],
+        { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+      );
+      assert.equal(statusResult.status, 0, statusResult.stderr || statusResult.stdout);
+      const stored = JSON.parse(statusResult.stdout).job;
+      assert.equal(stored.status, "cancelled");
+      assert.equal(stored.phase, "cancelled");
+      assert.equal(stored.routingState, "cancelled");
+      assert.equal(readClaudeInvocations(testEnv.claudeLogFile).length, 0);
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
   it("uses the installed plugin review skill without running $cc:setup first", async (t) => {
     if (!codexAvailable()) {
       t.skip("codex CLI is not available in this environment");

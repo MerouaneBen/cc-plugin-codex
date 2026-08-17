@@ -20,6 +20,7 @@ import {
   resolveWorkspaceHash,
   resolveStateDir,
   resolveJobsDir,
+  resolveJobFile,
   ensureStateDir,
   loadConfig,
   saveConfig,
@@ -1052,21 +1053,79 @@ describe("reapStaleJobs", () => {
     assert.equal(result[1].status, "failed");
   });
 
-  it("reaps cancelling job with dead PID", () => {
+  it("finalizes a cancelling job with a dead PID as cancelled", () => {
     const id = "test-reap-cancelling";
+    const reservationPath = path.join(resolveJobsDir(PROJECT_CWD), `${id}.reserve`);
     writeJobFile(PROJECT_CWD, id, {
       id,
       status: "cancelling",
+      phase: "cancelling",
       pid: 99999999,
       pidIdentity: "bogus",
       createdAt: nowIso(),
     });
+    fs.writeFileSync(reservationPath, "{}\n", "utf8");
     backdateJob(id, staleTimestamp());
 
     const jobs = [readJobFile(PROJECT_CWD, id)];
     const result = reapStaleJobs(PROJECT_CWD, jobs);
 
-    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].status, "cancelled");
+    assert.equal(result[0].phase, "cancelled");
+    assert.equal(result[0].pid, null);
+    assert.equal(fs.existsSync(reservationPath), false);
+  });
+
+  it("recovers an interrupted cancellation with no PID", () => {
+    const id = "test-reap-cancelling-nopid";
+    const jobsDir = resolveJobsDir(PROJECT_CWD);
+    const reservationPath = path.join(jobsDir, `${id}.reserve`);
+    const claimPath = path.join(jobsDir, `${id}.claim`);
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "cancelling",
+      phase: "cancelling",
+      routingState: "claimed",
+      launchDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      pid: null,
+      createdAt: nowIso(),
+    });
+    fs.writeFileSync(reservationPath, "{}\n", "utf8");
+    fs.writeFileSync(claimPath, "{}\n", "utf8");
+    backdateJob(id, staleTimestamp());
+
+    const result = reapStaleJobs(PROJECT_CWD, [readJobFile(PROJECT_CWD, id)]);
+
+    assert.equal(result[0].status, "cancelled");
+    assert.equal(result[0].phase, "cancelled");
+    assert.equal(result[0].routingState, "cancelled");
+    assert.equal(result[0].launchDeadlineAt, null);
+    assert.equal(result[0].pid, null);
+    assert.match(result[0].errorMessage, /interrupted cancellation/i);
+    assert.equal(fs.existsSync(reservationPath), false);
+    assert.equal(fs.existsSync(claimPath), false);
+  });
+
+  it("records an observable warning when interrupted-cancellation recovery fails", () => {
+    const id = "test-reap-cancelling-corrupt";
+    writeJobFile(PROJECT_CWD, id, {
+      id,
+      status: "cancelling",
+      phase: "cancelling",
+      pid: null,
+      createdAt: nowIso(),
+    });
+    backdateJob(id, staleTimestamp());
+    const job = readJobFile(PROJECT_CWD, id);
+    fs.writeFileSync(resolveJobFile(PROJECT_CWD, id), "{invalid", "utf8");
+
+    const result = reapStaleJobs(PROJECT_CWD, [job]);
+
+    assert.equal(result[0].status, "cancelling");
+    assert.match(
+      fs.readFileSync(resolveJobLogFile(PROJECT_CWD, id), "utf8"),
+      /State recovery warning \(interrupted-cancellation\)/
+    );
   });
 
   it("listJobs integrates the reaper automatically", () => {

@@ -1,14 +1,14 @@
 {
   "name": "cc",
-  "version": "1.4.2",
-  "description": "Claude Code Plugin for Codex. Delegate code reviews, investigations, and tracked tasks to Claude Code from inside Codex.",
+  "version": "1.4.3",
+  "description": "Personally maintained Claude Code Plugin for Codex. Delegate reviews, investigations, and tracked tasks to Claude Code.",
   "author": {
     "name": "Sendbird, Inc.",
     "email": "jin.ku@sendbird.com",
     "url": "https://sendbird.com/"
   },
-  "homepage": "https://github.com/sendbird/cc-plugin-codex",
-  "repository": "https://github.com/sendbird/cc-plugin-codex",
+  "homepage": "https://github.com/MerouaneBen/cc-plugin-codex",
+  "repository": "https://github.com/MerouaneBen/cc-plugin-codex",
   "license": "Apache-2.0",
   "keywords": [
     "claude-code",
@@ -23,15 +23,13 @@
     "displayName": "Claude Code",
     "shortDescription": "Claude Code Plugin for Codex",
     "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, and tracked rescue tasks through a Claude-backed runtime with job status and result retrieval.",
-    "developerName": "Sendbird, Inc.",
+    "developerName": "MerouaneBen (fork of Sendbird)",
     "category": "Coding",
     "capabilities": [
       "Interactive",
       "Write"
     ],
-    "websiteURL": "https://sendbird.com/",
-    "privacyPolicyURL": "https://sendbird.com/privacy-notice",
-    "termsOfServiceURL": "https://sendbird.com/terms-of-service",
+    "websiteURL": "https://github.com/MerouaneBen/cc-plugin-codex",
     "defaultPrompt": [
       "Use Claude Code to review my current changes through $cc:review",
       "Use Claude Code to challenge this implementation through $cc:adversarial-review",

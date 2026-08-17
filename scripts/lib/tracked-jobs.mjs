@@ -11,10 +11,11 @@
 
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import process from "node:process";
 
 import { terminateProcessTree } from "./process.mjs";
-import { nowIso, ensureStateDir, getCurrentSession, patchJob, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
+import { nowIso, ensureStateDir, getCurrentSession, readJobFile, resolveJobLogFile, writeJobFile, cleanupOldJobs, transitionJob } from "./state.mjs";
 
 export { nowIso };
 
@@ -89,6 +90,7 @@ function appendToBoundedLog(logFile, text) {
   if (!logFile || !text) {
     return;
   }
+  fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
   fs.appendFileSync(logFile, text, "utf8");
   trimLogFile(logFile);
 }
@@ -170,26 +172,27 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
   let lastThreadId = null;
   let lastTurnId = null;
+  let acceptsProgress = true;
 
   return (event) => {
+    if (!acceptsProgress) {
+      return;
+    }
     const normalized = normalizeProgressEvent(event);
     const patch = { id: jobId };
     let changed = false;
 
     if (normalized.phase && normalized.phase !== lastPhase) {
-      lastPhase = normalized.phase;
       patch.phase = normalized.phase;
       changed = true;
     }
 
     if (normalized.threadId && normalized.threadId !== lastThreadId) {
-      lastThreadId = normalized.threadId;
       patch.threadId = normalized.threadId;
       changed = true;
     }
 
     if (normalized.turnId && normalized.turnId !== lastTurnId) {
-      lastTurnId = normalized.turnId;
       patch.turnId = normalized.turnId;
       changed = true;
     }
@@ -198,7 +201,27 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    patchJob(workspaceRoot, jobId, patch);
+    // Progress is best-effort and may race with cancellation or completion.
+    // Guard the write so a late stream event cannot overwrite terminal fields.
+    try {
+      const transition = transitionJob(workspaceRoot, jobId, ["running"], "running", patch);
+      if (!transition.transitioned) {
+        acceptsProgress = false;
+        return;
+      }
+      lastPhase = normalized.phase ?? lastPhase;
+      lastThreadId = normalized.threadId ?? lastThreadId;
+      lastTurnId = normalized.turnId ?? lastTurnId;
+    } catch (error) {
+      // A CAS miss is returned, not thrown. Exceptions are real persistence
+      // failures, so retain retryability and leave a bounded job-log warning.
+      try {
+        appendLogLine(
+          resolveJobLogFile(workspaceRoot, jobId),
+          `Progress persistence warning: ${error?.message ?? String(error)}`
+        );
+      } catch {}
+    }
   };
 }
 

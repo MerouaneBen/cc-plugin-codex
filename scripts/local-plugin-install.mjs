@@ -8,9 +8,10 @@
 console.error(
   [
     "Local checkout installs are no longer supported.",
-    "Install cc from the Sendbird Codex marketplace so Codex owns the active plugin cache:",
-    "  codex marketplace add sendbird/codex-marketplace",
-    "Then install `cc` from that marketplace and run `$cc:setup`.",
+    "Install cc from the maintained personal marketplace so Codex owns the active plugin cache:",
+    "  codex plugin marketplace add MerouaneBen/cc-plugin-codex --ref main",
+    "  codex plugin add cc@merouane",
+    "Then start a new Codex task and run `$cc:setup`.",
   ].join("\n")
 );
 process.exit(1);

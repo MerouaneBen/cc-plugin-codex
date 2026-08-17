@@ -134,7 +134,9 @@ export function enrichJob(job, options = {}) {
   };
   return {
     ...enriched,
-    phase: enriched.phase ?? inferJobPhase(enriched, enriched.progressPreview),
+    phase: TERMINAL_STATUSES.has(enriched.status)
+      ? inferJobPhase(enriched, enriched.progressPreview)
+      : enriched.phase ?? inferJobPhase(enriched, enriched.progressPreview),
   };
 }
 
@@ -238,8 +240,7 @@ export function resolveCancelableJob(cwd, reference) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "queued");
   if (reference) {
-    const selected = matchJobReference(activeJobs, reference);
-    if (!selected) throw new Error(`No active job found for "${reference}".`);
+    const selected = matchJobReference(jobs, reference);
     return { workspaceRoot, job: selected };
   }
   if (activeJobs.length === 1) return { workspaceRoot, job: activeJobs[0] };

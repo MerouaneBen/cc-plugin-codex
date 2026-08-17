@@ -478,6 +478,13 @@ test("simple runtime skills resolve the active plugin root from the skill path",
   }
 });
 
+test("cancel documents idempotent explicit-job retries", () => {
+  const cancel = read("skills/cancel/SKILL.md");
+
+  assert.match(cancel, /same explicit job ID is idempotent/i);
+  assert.match(cancel, /persisted terminal status without changing it/i);
+});
+
 test("review skills never hard-require a question tool the thread may not have", () => {
   const contracts = ["skills/review/SKILL.md", "skills/adversarial-review/SKILL.md"];
 

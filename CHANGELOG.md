@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+## v1.4.3
+
 - Make Codex-managed background launches fail closed. Review, adversarial-review, and rescue now expose a queued reservation immediately, avoid claiming that an asynchronous `spawn_agent` started Claude, and require the child to materialize a companion-issued launch receipt before status can prove launch. Missing launchers, missing agent ids, and bounded materialization timeouts become stored failed jobs; claimed reservation markers prevent duplicate forwarding children, queued jobs remain visible in `$cc:status`, and late children cannot overwrite a launch failure.
+- Make cancellation terminal, idempotent, and race-safe. Queued reservations release routing markers, active processes retain PID identity protection, failed cancellation preserves recovery metadata, interrupted cancellations are reaped to a truthful terminal state, and late progress events can no longer overwrite cancelled job fields. Terminal presentation normalizes stale phases to the stored terminal status, while unexpected persistence and recovery errors are recorded in the job log instead of disappearing silently. Test processes now use isolated Codex state roots so a review that runs the suite cannot delete its own live job state.
+- Turn this fork into a self-contained personal Codex marketplace at `MerouaneBen/cc-plugin-codex`, update installer defaults and project metadata to the maintained fork, and document installation, project adoption, upgrades, rollback, and a production-style review workflow.
 
 ## v1.4.2
 

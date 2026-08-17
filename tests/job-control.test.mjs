@@ -15,6 +15,7 @@ import {
   enrichJob,
   readJobProgressPreview,
   buildStatusSnapshot,
+  resolveCancelableJob,
   resolveResultJob,
   DEFAULT_MAX_STATUS_JOBS,
   DEFAULT_MAX_PROGRESS_LINES,
@@ -323,6 +324,17 @@ describe("enrichJob", () => {
     assert.equal(enrichJob({ id: "j1", status: "unknown" }).phase, "unknown");
   });
 
+  it("normalizes stale stored phases for terminal jobs", () => {
+    assert.equal(
+      enrichJob({ id: "j1", status: "cancelled", phase: "queued" }).phase,
+      "cancelled"
+    );
+    assert.equal(
+      enrichJob({ id: "j2", status: "cancel_failed", phase: "cancelling" }).phase,
+      "cancel_failed"
+    );
+  });
+
   it("defaults running review phase to 'reviewing'", () => {
     const enriched = enrichJob({ id: "j1", status: "running", jobClass: "review" });
     assert.equal(enriched.phase, "reviewing");
@@ -331,6 +343,31 @@ describe("enrichJob", () => {
   it("defaults running task phase to 'running'", () => {
     const enriched = enrichJob({ id: "j1", status: "running", jobClass: "task" });
     assert.equal(enriched.phase, "running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCancelableJob
+// ---------------------------------------------------------------------------
+
+describe("resolveCancelableJob", () => {
+  it("resolves an explicitly referenced terminal job for idempotent cancellation", () => {
+    const repoDir = createTempGitRepo();
+    try {
+      writeJobFile(repoDir, "cancelled-job", {
+        id: "cancelled-job",
+        status: "cancelled",
+        phase: "cancelled",
+        createdAt: "2026-04-03T09:00:00Z",
+        completedAt: "2026-04-03T09:00:01Z",
+      });
+
+      const resolved = resolveCancelableJob(repoDir, "cancelled-job");
+      assert.equal(resolved.job.id, "cancelled-job");
+      assert.equal(resolved.job.status, "cancelled");
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });
 
