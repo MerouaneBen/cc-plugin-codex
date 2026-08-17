@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v1.4.6
+
+- Dissociate linked-worktree review clones from the source repository after their fast local creation. The temporary review repository now owns its object data and cannot lose objects if the source repository prunes unreachable commits during a long review.
+
 ## v1.4.5
 
 - Keep branch and adversarial reviews working when Codex itself runs from a linked git worktree. The review runtime now detects that topology and creates its isolated checkout as a shared read-only clone under plugin runtime data, avoiding writes to the source repository's common `.git/worktrees` directory that the Codex sandbox correctly blocks.

@@ -143,6 +143,7 @@ export function createReviewClone(repoRoot, { label = "review", ref = "HEAD" } =
   const cloned = runGit(repoRoot, [
     "clone",
     "--shared",
+    "--dissociate",
     "--no-checkout",
     "--quiet",
     repoRoot,
