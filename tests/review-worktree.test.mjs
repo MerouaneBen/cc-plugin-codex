@@ -186,6 +186,7 @@ describe("createReviewIsolation", () => {
       assert.notEqual(iso.cwd, repoRoot);
       assert.equal(iso.gitRoot, iso.cwd);
       assert.equal(iso.isolated, true);
+      assert.equal(iso.strategy, "worktree");
       assert.ok(fs.existsSync(iso.cwd));
     } finally {
       iso.cleanup();
@@ -208,6 +209,11 @@ describe("createReviewIsolation", () => {
         assert.equal(iso.isolated, true);
         assert.equal(iso.strategy, "clone");
         assert.ok(fs.existsSync(path.join(iso.cwd, "file.txt")));
+        assert.equal(
+          fs.existsSync(path.join(iso.cwd, ".git", "objects", "info", "alternates")),
+          false,
+          "clone isolation must own its objects after creation",
+        );
         assert.equal(
           git(repoRoot, ["worktree", "list", "--porcelain"]).stdout,
           registeredBefore,
