@@ -29,8 +29,30 @@ const ABORT_REASONS = new Set([
   "spawn-agent-unavailable",
   "spawn-agent-failed",
   "spawn-agent-no-id",
+  "network-unavailable-no-escalation",
+  "sandbox-escalation-forbidden",
+  "forwarder-exec-rejected",
   "launch-receipt-failed",
   "launch-timeout",
+]);
+
+const ABORT_REASON_MESSAGES = new Map([
+  [
+    "network-unavailable-no-escalation",
+    "Host network is unavailable and the approval policy forbids sandbox escalation; Claude Code was not started.",
+  ],
+  [
+    "sandbox-escalation-forbidden",
+    "The host approval policy forbids the required sandbox escalation; Claude Code was not started.",
+  ],
+  [
+    "forwarder-exec-rejected",
+    "Codex rejected the forwarding agent's companion command before Claude Code started.",
+  ],
+  [
+    "launch-timeout",
+    "The Codex forwarding agent did not materialize a Claude Code job before the launch timeout.",
+  ],
 ]);
 
 function sleep(ms) {
@@ -184,9 +206,8 @@ function createLaunchFailureRecord(workspaceRoot, jobId, marker, reason, forward
   const isReview = marker?.kind === "review";
   const safeReason = ABORT_REASONS.has(reason) ? reason : "launch-receipt-failed";
   const errorMessage =
-    safeReason === "launch-timeout"
-      ? "The Codex forwarding agent did not materialize a Claude Code job before the launch timeout."
-      : `The Codex forwarding agent failed before Claude Code started (${safeReason}).`;
+    ABORT_REASON_MESSAGES.get(safeReason) ??
+    `The Codex forwarding agent failed before Claude Code started (${safeReason}).`;
   const record = {
     id: jobId,
     kind: isReview ? "review" : "task",

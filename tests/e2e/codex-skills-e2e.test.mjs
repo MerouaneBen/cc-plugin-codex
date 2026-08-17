@@ -339,9 +339,21 @@ rl.on("line", (line) => {
 
 function writeConfigToml(testEnv, port) {
   const configFile = path.join(testEnv.codexHome, "config.toml");
-  const existing = fs.existsSync(configFile)
+  let existing = fs.existsSync(configFile)
     ? fs.readFileSync(configFile, "utf8").trim()
     : "";
+  if (existing.includes("[sandbox_workspace_write]")) {
+    if (!/\bnetwork_access\s*=/.test(existing)) {
+      existing = existing.replace(
+        "[sandbox_workspace_write]",
+        "[sandbox_workspace_write]\nnetwork_access = true",
+      );
+    }
+  } else {
+    existing = [existing, "[sandbox_workspace_write]\nnetwork_access = true"]
+      .filter(Boolean)
+      .join("\n\n");
+  }
   fs.writeFileSync(
     configFile,
     `model = "mock-model"
@@ -888,7 +900,11 @@ function startMockProvider({
               "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
               "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
               "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-              "Use sandbox_permissions: \"require_escalated\" with a justification that allows the Claude Code companion to contact the Claude API. Do not first try the companion command in the default network-disabled sandbox.\n" +
+              "Resolve permissions from the host-provided approval policy and network context before the command.\n" +
+              "Because this host reports network access already enabled, omit sandbox_permissions entirely even though approval policy is Never.\n" +
+              "Only when host network is unavailable and escalation is permitted, use sandbox_permissions: \"require_escalated\" with a justification that allows the Claude Code companion to contact the Claude API.\n" +
+              "If network is unavailable and approval policy is Never, do not invoke the command. Never issue an invalid escalation request to probe the policy.\n" +
+              "If the shell call is rejected before launch, run one local background-launch-abort recovery command without sandbox_permissions using reason forwarder-exec-rejected.\n" +
               "Return only that command's stdout text exactly.\n" +
               "Ignore stderr progress chatter such as [cc] lines.\n" +
               "If the tool output includes both stderr progress and a final stdout-style result, preserve only the final stdout-equivalent result text.\n" +
@@ -965,16 +981,26 @@ function startMockProvider({
             );
           }
           assert.ok(
-            bodyText.includes("sandbox_permissions") && bodyText.includes("require_escalated"),
-            "built-in child should request targeted escalation for Claude API access"
+            bodyText.includes("network access already enabled") &&
+              bodyText.includes("omit sandbox_permissions"),
+            "built-in child should use current permissions when host network is already enabled"
+          );
+          assert.ok(
+            bodyText.includes("require_escalated") && bodyText.includes("escalation is permitted"),
+            "built-in child should retain targeted escalation for network-restricted hosts"
           );
           assert.ok(
             bodyText.includes("contact the Claude API"),
             "built-in child should receive a scoped network justification"
           );
           assert.ok(
-            bodyText.includes("Do not first try the companion command in the default network-disabled sandbox."),
-            "built-in child should avoid the known ENOTFOUND first attempt"
+            bodyText.includes("Never issue an invalid escalation request to probe the policy."),
+            "built-in child should not use host rejection as permission detection"
+          );
+          assert.ok(
+            bodyText.includes("background-launch-abort") &&
+              bodyText.includes("forwarder-exec-rejected"),
+            "built-in child should persist an unexpected pre-launch command rejection"
           );
           assert.doesNotMatch(
             bodyText,
@@ -988,12 +1014,20 @@ function startMockProvider({
             );
           }
           const shellTool = chooseShellTool(body);
+          const shellArgs = buildShellArgs(shellTool, taskCommand);
+          if (shellTool === "exec_command") {
+            assert.equal(
+              Object.hasOwn(shellArgs, "sandbox_permissions"),
+              false,
+              "approval Never plus enabled host network must omit sandbox_permissions",
+            );
+          }
           events = [
             eventCreated("resp-child-1"),
             eventFunctionCall(
               shellCallId,
               shellTool,
-              buildShellArgs(shellTool, taskCommand)
+              shellArgs
             ),
             eventCompleted("resp-child-1"),
           ];
@@ -1909,7 +1943,11 @@ describe("Codex direct-skill E2E", () => {
         "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
         "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
         "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-        "Use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review. Do not first try the companion command in the default network-disabled sandbox.\n" +
+        "Resolve permissions from the host-provided approval policy and network context before the command.\n" +
+        "Because this host reports network access already enabled, omit sandbox_permissions entirely even though approval policy is Never.\n" +
+        "Only when host network is unavailable and escalation is permitted, use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review.\n" +
+        "If network is unavailable and approval policy is Never, do not invoke the command. Never issue an invalid escalation request to probe the policy.\n" +
+        "If the shell call is rejected before launch, run one local background-launch-abort recovery command without sandbox_permissions using reason forwarder-exec-rejected.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
@@ -2138,7 +2176,11 @@ describe("Codex direct-skill E2E", () => {
         "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
         "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
         "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-        "Use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review. Do not first try the companion command in the default network-disabled sandbox.\n" +
+        "Resolve permissions from the host-provided approval policy and network context before the command.\n" +
+        "Because this host reports network access already enabled, omit sandbox_permissions entirely even though approval policy is Never.\n" +
+        "Only when host network is unavailable and escalation is permitted, use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review.\n" +
+        "If network is unavailable and approval policy is Never, do not invoke the command. Never issue an invalid escalation request to probe the policy.\n" +
+        "If the shell call is rejected before launch, run one local background-launch-abort recovery command without sandbox_permissions using reason forwarder-exec-rejected.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +

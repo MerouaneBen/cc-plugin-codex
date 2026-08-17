@@ -57,10 +57,18 @@ Argument handling:
 - The companion review process itself always runs in the foreground. Background mode only changes how Codex launches that command.
 - For the detailed execution contract, treat the internal runtime reference at `../../internal-skills/review-runtime/runtime.md` as supporting guidance only. It is an internal reference document, not a public skill to invoke.
 
+Command-permission matrix (resolve before every companion command):
+- Use only the host-provided approval policy and network-availability context. Never issue a deliberately invalid escalation request to discover the policy.
+- If the host reports that network access is already enabled, omit `sandbox_permissions` entirely, including when the approval policy is `Never`.
+- If host network access is unavailable and the approval policy permits escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` on the one `exec_command` call.
+- If host network access is unavailable and the approval policy is `Never`, do not invoke or spawn the companion. For foreground adversarial review, surface `network-unavailable-no-escalation`. For background adversarial review, reserve the tracked job and immediately run `background-launch-abort --job-id <reserved-job-id> --reason network-unavailable-no-escalation --cwd <workspace-root> --json`; do not spawn a forwarding child.
+- If the host does not state network availability, treat it as unavailable and follow the approval-policy branch above. Do not guess that network is enabled.
+- If a forwarding child's `exec_command` is rejected before a launch receipt exists, that child must use one local recovery command without `sandbox_permissions` to run `background-launch-abort --job-id <reserved-job-id> --reason forwarder-exec-rejected --cwd <workspace-root> --json`; do not collapse it to `launch-receipt-failed`.
+
 Foreground flow:
 - Run:
   `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review --view-state on-success <arguments with --wait/--background removed>`
-- Run that companion command with `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` Do not first try the companion command in the default network-disabled sandbox.
+- Run that companion command exactly once using the command-permission matrix above.
 - Foreground adversarial review belongs to the main Codex thread. Do not spawn a review subagent, do not invoke a generic review-runner role, and do not proxy this foreground path through any background worker abstraction.
 - Do not fall back to raw `claude`, `claude-code`, `claude review`, `bash -lc ...claude...`, or any other direct Claude CLI syntax when the companion path is available. The foreground syntax contract here is the resolved companion command above, not a hand-rolled Claude invocation.
 - If the resolved companion command fails, surface that failure. Do not silently retry foreground adversarial review through a different CLI shape, a generic review runner, or a custom shell wrapper.
@@ -101,7 +109,8 @@ Background flow:
   - run that command as one blocking foreground shell-tool call, not as a background terminal/session
   - do not request a shell session id, poll a shell session later, or return before the companion command exits
   - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
-  - when using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` on that one call; do not first try the companion command in the default network-disabled sandbox
+  - when using `exec_command`, apply the command-permission matrix above; omit `sandbox_permissions` when host network is already enabled, and request targeted escalation only when network is unavailable and escalation is permitted
+  - if that shell-tool call is rejected before launch, make exactly one exception to the one-command rule: run the local `background-launch-abort` recovery command from the matrix without `sandbox_permissions`, then return the persisted failure
   - include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id
   - include `--job-id <reserved-job-id>` when the parent reserved one
   - include the matching `--cwd <workspace-root>` whenever the command includes that reserved `--job-id`

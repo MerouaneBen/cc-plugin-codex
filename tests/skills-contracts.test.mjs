@@ -16,6 +16,58 @@ function read(relativePath) {
   return fs.readFileSync(path.join(PROJECT_ROOT, relativePath), "utf8");
 }
 
+function assertPermissionMatrix(contract, contractPath) {
+  assert.match(
+    contract,
+    /host(?:-provided| context)[^\n]*(?:approval policy|network)/i,
+    `${contractPath} must use host-provided permission context`,
+  );
+  assert.match(
+    contract,
+    /network[^\n]*enabled[^\n]*omit `sandbox_permissions`/i,
+    `${contractPath} must omit escalation when network is already enabled`,
+  );
+  assert.match(
+    contract,
+    /network[^\n]*unavailable[^\n]*approval policy[^\n]*`Never`/i,
+    `${contractPath} must fail closed when network is unavailable and escalation is forbidden`,
+  );
+  assert.match(
+    contract,
+    /background[^\n]*(?:background-launch-abort|aborts the job)[^\n]*network-unavailable-no-escalation/i,
+    `${contractPath} must persist the no-network/no-escalation reason`,
+  );
+  assert.match(
+    contract,
+    /sandbox_permissions: "require_escalated"/i,
+    `${contractPath} must retain targeted escalation when the policy permits it`,
+  );
+  assert.match(
+    contract,
+    /background-launch-abort[^\n]*forwarder-exec-rejected/i,
+    `${contractPath} must persist forwarding command rejection through the local abort command`,
+  );
+  assert.match(
+    contract,
+    /Never (?:issue|probe)[^\n]*(?:invalid|rejected) escalation request/i,
+    `${contractPath} must not use a rejected escalation as feature detection`,
+  );
+}
+
+test("review and rescue contracts branch on host approval policy and network access", () => {
+  const contracts = [
+    "skills/review/SKILL.md",
+    "skills/adversarial-review/SKILL.md",
+    "skills/rescue/SKILL.md",
+    "internal-skills/review-runtime/runtime.md",
+    "internal-skills/cli-runtime/runtime.md",
+  ];
+
+  for (const contractPath of contracts) {
+    assertPermissionMatrix(read(contractPath), contractPath);
+  }
+});
+
 test("public model contracts document native Fable support and host-owned effort defaults", () => {
   const contracts = [
     "README.md",
@@ -123,7 +175,6 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(reviewRuntime, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
   assert.match(reviewRuntime, /`sandbox_permissions: "require_escalated"`/i);
   assert.match(reviewRuntime, /contact the Claude API for this requested review/i);
-  assert.match(reviewRuntime, /Do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(reviewRuntime, /mention the tool name `send_input` literally/i);
   assert.match(reviewRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(reviewRuntime, /do not silently drop the completion notification path when the parent provided a non-empty parent thread id/i);
@@ -145,7 +196,6 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(rescueRuntime, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
   assert.match(rescueRuntime, /`sandbox_permissions: "require_escalated"`/i);
   assert.match(rescueRuntime, /contact the Claude API for this requested task/i);
-  assert.match(rescueRuntime, /Do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(rescueRuntime, /allow at most one success-only `send_input` notification before finishing/i);
   assert.match(rescueRuntime, /Mention the tool name `send_input` literally/i);
   assert.match(rescueRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
@@ -204,7 +254,6 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
   assert.match(review, /`sandbox_permissions: "require_escalated"`/i);
   assert.match(review, /contact the Claude API for this requested review/i);
-  assert.match(review, /do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(review, /allow one extra `send_input` call after a successful shell result/i);
   assert.match(review, /must mention the tool name `send_input` literally/i);
   assert.match(review, /must target the provided parent thread id/i);
@@ -266,7 +315,6 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
   assert.match(adversarial, /`sandbox_permissions: "require_escalated"`/i);
   assert.match(adversarial, /contact the Claude API for this requested review/i);
-  assert.match(adversarial, /do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(adversarial, /allow one extra `send_input` call after a successful shell result/i);
   assert.match(adversarial, /must mention the tool name `send_input` literally/i);
   assert.match(adversarial, /must target the provided parent thread id/i);
@@ -365,7 +413,6 @@ test("rescue skill documents the experimental built-in-agent forwarding path", (
   assert.match(rescue, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
   assert.match(rescue, /`sandbox_permissions: "require_escalated"`/i);
   assert.match(rescue, /contact the Claude API for this requested task/i);
-  assert.match(rescue, /do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(rescue, /prefer these steering messages over embedding the raw result text/i);
   assert.match(rescue, /do not embed the raw Claude result inside the notification message/i);
   assert.match(rescue, /do not include any other prose in that notification message/i);
