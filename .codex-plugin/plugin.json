@@ -1,6 +1,6 @@
 {
   "name": "cc",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Personally maintained Claude Code Plugin for Codex. Delegate reviews, investigations, and tracked tasks to Claude Code.",
   "author": {
     "name": "Sendbird, Inc.",

@@ -19,7 +19,7 @@ Foreground contract:
 - Foreground command:
   - `review --view-state on-success ...`
   - `adversarial-review --view-state on-success ...`
-- Run the companion command with `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` Do not first try the companion command in the default network-disabled sandbox.
+- Resolve permissions from explicit host context before running the companion. If host network is enabled, omit `sandbox_permissions`, including under approval policy `Never`. If network is unavailable and escalation is permitted, use `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` If network is unavailable and approval policy is `Never`, do not invoke the companion; foreground returns `network-unavailable-no-escalation`, while background reserves the job then runs `background-launch-abort --reason network-unavailable-no-escalation` without spawning a child. Treat unstated network availability as unavailable. Never probe the policy with a deliberately rejected escalation request.
 - Return companion stdout faithfully and do not add review execution commentary around it.
 
 Background contract:
@@ -43,7 +43,8 @@ Background contract:
   - run the companion command as one blocking foreground shell-tool call, not as a background terminal/session
   - do not request a shell session id, poll a shell session later, or return before the companion command exits
   - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
-  - when using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` on that one call; do not first try the companion command in the default network-disabled sandbox
+  - when using `exec_command`, apply the host permission matrix above and make exactly one valid call
+  - if the child command is rejected before launch, the forwarding child makes exactly one local recovery call without `sandbox_permissions`: `background-launch-abort --job-id <reserved-job-id> --reason forwarder-exec-rejected --cwd <workspace-root> --json`; this recovery call is the sole exception to the one-command rule
   - use at most one `send_input` completion notification on success
   - mention the tool name `send_input` literally in the child instructions
   - use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v1.4.4
+
+- Make rescue, review, and adversarial-review compatible with Codex hosts whose approval policy is `Never`. The forwarding contract now omits `sandbox_permissions` when host network is already enabled, keeps targeted escalation for network-restricted hosts that permit it, and fails before launch with `network-unavailable-no-escalation` when neither path is available. Durable routing also preserves `sandbox-escalation-forbidden` and `forwarder-exec-rejected` instead of normalizing those known failures to `launch-receipt-failed`.
+
 ## v1.4.3
 
 - Make Codex-managed background launches fail closed. Review, adversarial-review, and rescue now expose a queued reservation immediately, avoid claiming that an asynchronous `spawn_agent` started Claude, and require the child to materialize a companion-issued launch receipt before status can prove launch. Missing launchers, missing agent ids, and bounded materialization timeouts become stored failed jobs; claimed reservation markers prevent duplicate forwarding children, queued jobs remain visible in `$cc:status`, and late children cannot overwrite a launch failure.

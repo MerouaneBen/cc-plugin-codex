@@ -92,6 +92,14 @@ Subagent launch:
 - This parent wake-up attempt is now the default for background built-in rescue on persistent Codex/Desktop threads. It is still best-effort and should silently degrade on one-shot `codex exec` runs.
 - For the built-in rescue path, the parent thread owns prompt shaping. The built-in child should stay a pure executor.
 - For the built-in rescue path, treat the internal runtime reference at `../../internal-skills/cli-runtime/runtime.md` as the command-building contract for the forwarding worker. It is an internal reference document, not a public skill to invoke.
+
+Command-permission matrix (resolve before every companion command):
+- Use only the host-provided approval policy and network-availability context. Never issue a deliberately invalid escalation request to discover the policy.
+- If the host reports that network access is already enabled, omit `sandbox_permissions` entirely, including when the approval policy is `Never`.
+- If host network access is unavailable and the approval policy permits escalation, pass `sandbox_permissions: "require_escalated"` with the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` on the one `exec_command` call.
+- If host network access is unavailable and the approval policy is `Never`, do not invoke or spawn the companion. For foreground rescue, surface `network-unavailable-no-escalation`. For background rescue, reserve the tracked job and immediately run `background-launch-abort --job-id <reserved-job-id> --reason network-unavailable-no-escalation --cwd <workspace-root> --json`; do not spawn a forwarding child.
+- If the host does not state network availability, treat it as unavailable and follow the approval-policy branch above. Do not guess that network is enabled.
+- If a forwarding child's `exec_command` is rejected before a launch receipt exists, that child must use one local recovery command without `sandbox_permissions` to run `background-launch-abort --job-id <reserved-job-id> --reason forwarder-exec-rejected --cwd <workspace-root> --json`; do not collapse it to `launch-receipt-failed`.
 - If the built-in rescue request is vague, chatty, or a follow-up, the parent may tighten only the task text before composing the exact companion command.
 - Prefer passing a small structured `<parent_context>` block instead of forked thread history when the child needs a little prior context.
 - Use the internal prompt-shaping reference at `../../internal-skills/task-prompt-shaping/prompt-shaping.md` as deeper guidance for that parent-side tightening. It is an internal reference document, not a public skill to invoke.
@@ -132,7 +140,8 @@ Subagent launch:
   - run that command as one blocking foreground shell-tool call, not as a background terminal/session
   - do not request a shell session id, poll a shell session later, or return before the companion command exits
   - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
-  - when using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` on that one call; do not first try the companion command in the default network-disabled sandbox
+  - when using `exec_command`, apply the command-permission matrix above; omit `sandbox_permissions` when host network is already enabled, and request targeted escalation only when network is unavailable and escalation is permitted
+  - if that shell-tool call is rejected before launch, make exactly one exception to the one-command rule: run the local `background-launch-abort` recovery command from the matrix without `sandbox_permissions`, then return the persisted failure
   - for foreground rescue only, tell the child to return that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
   - tell the child to ignore stderr progress chatter such as `[cc] ...` lines and preserve only the stdout-equivalent final result text
   - if a parent thread id is provided for experimental background notification, allow one extra `send_input` call after a successful shell result and before finishing

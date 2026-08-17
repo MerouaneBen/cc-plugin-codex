@@ -1943,6 +1943,53 @@ describe("claude-companion integration", () => {
     }
   });
 
+  it("preserves actionable permission and forwarder failure reasons", () => {
+    const testEnv = createTestEnvironment();
+    const scenarios = [
+      {
+        reason: "network-unavailable-no-escalation",
+        message: /network is unavailable.*approval policy forbids sandbox escalation/i,
+      },
+      {
+        reason: "sandbox-escalation-forbidden",
+        message: /approval policy forbids the required sandbox escalation/i,
+      },
+      {
+        reason: "forwarder-exec-rejected",
+        message: /rejected the forwarding agent's companion command/i,
+      },
+    ];
+
+    try {
+      for (const scenario of scenarios) {
+        const routing = runCompanionJson(
+          ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+          { env: testEnv.env },
+        );
+        const aborted = runCompanionJson(
+          [
+            "background-launch-abort",
+            "--job-id",
+            routing.jobId,
+            "--reason",
+            scenario.reason,
+            "--cwd",
+            testEnv.workspaceDir,
+            "--json",
+          ],
+          { env: testEnv.env },
+        );
+
+        assert.equal(aborted.job.status, "failed");
+        assert.equal(aborted.job.routingState, "failed");
+        assert.equal(aborted.job.routingFailureReason, scenario.reason);
+        assert.match(aborted.job.errorMessage, scenario.message);
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
   it("issues a launch receipt only after the forwarding child materializes the reserved job", async () => {
     const testEnv = createTestEnvironment();
     setupGitWorkspace(testEnv.workspaceDir);
