@@ -43,6 +43,13 @@ import {
   resolveJobLogFile,
   nowIso,
 } from "../scripts/lib/state.mjs";
+import {
+  DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS,
+  claimBackgroundJobId,
+  releaseBackgroundJobId,
+  reserveBackgroundJobId,
+  resolveBackgroundLaunchTimeoutMs,
+} from "../scripts/lib/background-routing.mjs";
 
 // We'll use the project root as a known git-repo cwd for workspace resolution.
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1144,5 +1151,56 @@ describe("reapStaleJobs", () => {
     assert.ok(found);
     assert.equal(found.status, "failed");
     assert.ok(found.errorMessage.includes("Auto-reaped"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background routing deadlines
+// ---------------------------------------------------------------------------
+
+describe("background routing deadlines", () => {
+  it("uses a bounded configurable launch timeout", () => {
+    assert.equal(DEFAULT_BACKGROUND_LAUNCH_TIMEOUT_MS, 60_000);
+    assert.equal(resolveBackgroundLaunchTimeoutMs(""), 60_000);
+    assert.equal(resolveBackgroundLaunchTimeoutMs("invalid"), 60_000);
+    assert.equal(resolveBackgroundLaunchTimeoutMs("25"), 1_000);
+    assert.equal(resolveBackgroundLaunchTimeoutMs("120000"), 120_000);
+    assert.equal(resolveBackgroundLaunchTimeoutMs("99999999"), 15 * 60_000);
+  });
+
+  it("refreshes an expired reservation deadline when the forwarding child claims it", () => {
+    const repoDir = createTempGitRepo();
+    let jobId = null;
+
+    try {
+      const reservation = reserveBackgroundJobId(repoDir, {
+        prefix: "task",
+        kind: "task",
+        materializePlaceholder: true,
+        launchTimeoutMs: 1_000,
+      });
+      jobId = reservation.jobId;
+      patchJob(repoDir, jobId, {
+        launchDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+
+      claimBackgroundJobId(repoDir, jobId, { launchTimeoutMs: 5_000 });
+
+      const claimed = readJobFile(repoDir, jobId);
+      assert.equal(claimed.status, "queued");
+      assert.equal(claimed.routingState, "claimed");
+      assert.ok(Date.parse(claimed.launchDeadlineAt) - Date.now() > 4_000);
+
+      const listed = listJobs(repoDir).find((job) => job.id === jobId);
+      assert.ok(listed);
+      assert.equal(listed.status, "queued");
+      assert.equal(listed.routingState, "claimed");
+    } finally {
+      if (jobId) {
+        releaseBackgroundJobId(repoDir, jobId);
+      }
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });
