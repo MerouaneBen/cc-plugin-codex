@@ -1667,6 +1667,72 @@ describe("Codex rescue-skill E2E", () => {
 });
 
 describe("Codex direct-skill E2E", () => {
+  it("routes the installed $cc:cancel skill and persists a truthful terminal result", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const workspaceDir = path.join(testEnv.rootDir, "installed-cancel-workspace");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    setupGitWorkspace(workspaceDir);
+
+    const pluginRoot = installPlugin(testEnv);
+    const companionScript = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+    const routingResult = spawnSync(
+      process.execPath,
+      [
+        companionScript,
+        "background-routing-context",
+        "--kind",
+        "review",
+        "--cwd",
+        workspaceDir,
+        "--json",
+      ],
+      { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+    );
+    assert.equal(routingResult.status, 0, routingResult.stderr || routingResult.stdout);
+    const jobId = JSON.parse(routingResult.stdout).jobId;
+
+    const userRequest = `$cc:cancel ${jobId}`;
+    const provider = startDirectSkillProvider({
+      userRequest,
+      expectedNeedles: ["Claude Code Cancel", "same explicit job ID is idempotent"],
+      shellCommands: [
+        `node ${JSON.stringify(companionScript)} cancel ${JSON.stringify(jobId)}`,
+      ],
+      cwd: workspaceDir,
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(testEnv, userRequest, { cwd: workspaceDir });
+
+      assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8");
+      assert.match(finalMessage, /# Claude Code Cancel/);
+      assert.match(finalMessage, new RegExp(`Cancelled ${jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+      const statusResult = spawnSync(
+        process.execPath,
+        [companionScript, "status", jobId, "--cwd", workspaceDir, "--json"],
+        { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+      );
+      assert.equal(statusResult.status, 0, statusResult.stderr || statusResult.stdout);
+      const stored = JSON.parse(statusResult.stdout).job;
+      assert.equal(stored.status, "cancelled");
+      assert.equal(stored.phase, "cancelled");
+      assert.equal(stored.routingState, "cancelled");
+      assert.equal(readClaudeInvocations(testEnv.claudeLogFile).length, 0);
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
   it("uses the installed plugin review skill without running $cc:setup first", async (t) => {
     if (!codexAvailable()) {
       t.skip("codex CLI is not available in this environment");
@@ -1784,7 +1850,21 @@ describe("Codex direct-skill E2E", () => {
       "utf8"
     );
 
-    const reservedJobId = "review-background-steer-123";
+    const routingResult = spawnSync(
+      process.execPath,
+      [
+        COMPANION_SCRIPT,
+        "background-routing-context",
+        "--kind",
+        "review",
+        "--cwd",
+        workspaceDir,
+        "--json",
+      ],
+      { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+    );
+    assert.equal(routingResult.status, 0, routingResult.stderr || routingResult.stdout);
+    const reservedJobId = JSON.parse(routingResult.stdout).jobId;
     const ownerSessionId = "parent-review-session";
     const userRequest = "$cc:review --background --scope working-tree --model haiku";
     const notificationMessage =
@@ -1804,9 +1884,13 @@ describe("Codex direct-skill E2E", () => {
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
+        "Require an actual `spawn_agent` tool call and a non-empty agent id",
+        "reserved job is immediately visible as `queued`",
+        "launch is not yet verified",
+        "Treat `$cc:status <reserved-job-id>` as the durable authority",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} --cwd ${JSON.stringify(workspaceDir)}`,
       expectedChildNeedles: [
         "--view-state defer",
         "--job-id",
@@ -1830,7 +1914,7 @@ describe("Codex direct-skill E2E", () => {
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} --cwd ${JSON.stringify(workspaceDir)}`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -1856,7 +1940,22 @@ describe("Codex direct-skill E2E", () => {
       );
 
       const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.ok(
+        provider.phases.includes("child-shell") && provider.phases.includes("child-final"),
+        `missing child materialization phases: ${JSON.stringify(provider.phases)}`
+      );
       assert.equal(finalMessage, notificationMessage);
+
+      const result = spawnSync(
+        process.execPath,
+        [COMPANION_SCRIPT, "result", reservedJobId, "--cwd", workspaceDir, "--json"],
+        { cwd: workspaceDir, env: testEnv.env, encoding: "utf8" }
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const stored = JSON.parse(result.stdout).storedJob;
+      assert.equal(stored.status, "completed");
+      assert.equal(stored.routingState, "launched");
+      assert.match(stored.launchReceipt ?? "", /^launch-[0-9a-f]{16}$/);
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);

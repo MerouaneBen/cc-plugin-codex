@@ -19,9 +19,10 @@ import {
   createJobLogFile,
   createWorkerLogStdio,
   createJobRecord,
+  createJobProgressUpdater,
   runTrackedJob,
 } from "../scripts/lib/tracked-jobs.mjs";
-import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, setCurrentSession, writeJobFile } from "../scripts/lib/state.mjs";
+import { clearCurrentSession, ensureStateDir, readJobFile, resolveJobFile, resolveJobLogFile, resolveStateDir, setCurrentSession, writeJobFile } from "../scripts/lib/state.mjs";
 
 const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -60,6 +61,103 @@ describe("nowIso (tracked-jobs re-export)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// createJobProgressUpdater
+// ---------------------------------------------------------------------------
+
+describe("createJobProgressUpdater", () => {
+  it("persists progress while the job is running", () => {
+    const repoDir = createTempGitRepo();
+    const jobId = "progress-running";
+    try {
+      writeJobFile(repoDir, jobId, {
+        id: jobId,
+        status: "running",
+        phase: "starting",
+        createdAt: nowIso(),
+      });
+
+      createJobProgressUpdater(repoDir, jobId)({
+        phase: "thinking",
+        threadId: "thread-123",
+      });
+
+      const stored = readJobFile(repoDir, jobId);
+      assert.equal(stored.status, "running");
+      assert.equal(stored.phase, "thinking");
+      assert.equal(stored.threadId, "thread-123");
+    } finally {
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores late progress after cancellation becomes terminal", () => {
+    const repoDir = createTempGitRepo();
+    const jobId = "progress-cancelled";
+    try {
+      writeJobFile(repoDir, jobId, {
+        id: jobId,
+        status: "cancelled",
+        phase: "cancelled",
+        completedAt: nowIso(),
+        createdAt: nowIso(),
+      });
+
+      const update = createJobProgressUpdater(repoDir, jobId);
+      update({
+        phase: "running",
+        threadId: "late-thread",
+      });
+
+      const stored = readJobFile(repoDir, jobId);
+      assert.equal(stored.status, "cancelled");
+      assert.equal(stored.phase, "cancelled");
+      assert.equal(stored.threadId, undefined);
+
+      fs.unlinkSync(resolveJobFile(repoDir, jobId));
+      update({ phase: "thinking" });
+      assert.equal(fs.existsSync(resolveJobLogFile(repoDir, jobId)), false);
+    } finally {
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs persistence errors and retries an unchanged progress event", () => {
+    const repoDir = createTempGitRepo();
+    const jobId = "progress-retry";
+    try {
+      writeJobFile(repoDir, jobId, {
+        id: jobId,
+        status: "running",
+        phase: "starting",
+        createdAt: nowIso(),
+      });
+      const update = createJobProgressUpdater(repoDir, jobId);
+      fs.unlinkSync(resolveJobFile(repoDir, jobId));
+
+      update({ phase: "thinking" });
+      assert.match(
+        fs.readFileSync(resolveJobLogFile(repoDir, jobId), "utf8"),
+        /Progress persistence warning/
+      );
+
+      writeJobFile(repoDir, jobId, {
+        id: jobId,
+        status: "running",
+        phase: "starting",
+        createdAt: nowIso(),
+      });
+      update({ phase: "thinking" });
+      assert.equal(readJobFile(repoDir, jobId).phase, "thinking");
+    } finally {
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // appendLogLine
 // ---------------------------------------------------------------------------
 
@@ -72,7 +170,7 @@ describe("appendLogLine", () => {
 
   afterEach(() => {
     for (const f of fs.readdirSync(tmpDir)) {
-      fs.unlinkSync(path.join(tmpDir, f));
+      fs.rmSync(path.join(tmpDir, f), { recursive: true, force: true });
     }
   });
 
@@ -106,6 +204,12 @@ describe("appendLogLine", () => {
   it("is a no-op when logFile is null", () => {
     // Should not throw
     appendLogLine(null, "hello");
+  });
+
+  it("recreates a missing parent directory before appending", () => {
+    const nestedLog = path.join(tmpDir, "removed", "job.log");
+    appendLogLine(nestedLog, "recovered");
+    assert.match(fs.readFileSync(nestedLog, "utf8"), /recovered/);
   });
 
   it("trims oversized logs to the configured byte cap", () => {

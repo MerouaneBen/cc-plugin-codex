@@ -18,7 +18,8 @@
   <a href="#background-jobs"><strong>Background Jobs</strong></a> ·
   <a href="#review-gate"><strong>Review Gate</strong></a> ·
   <a href="#how-this-differs-from-upstream"><strong>vs Upstream</strong></a> ·
-  <a href="https://github.com/sendbird/cc-plugin-codex/issues"><strong>Issues</strong></a>
+  <a href="docs/PERSONAL-USAGE.md"><strong>Personal Usage</strong></a> ·
+  <a href="https://github.com/MerouaneBen/cc-plugin-codex/issues"><strong>Issues</strong></a>
 </p>
 
 ---
@@ -27,6 +28,10 @@
 
 `cc-plugin-codex` turns Codex into a host for Claude Code work.
 **Codex stays in charge of the thread. Claude Code does the review and rescue work.**
+
+This repository is the personally maintained `MerouaneBen` distribution of
+Sendbird's Apache-2.0 project. `main` is the installable personal release line;
+the fork does not depend on the Sendbird marketplace for installation or updates.
 
 You get seven commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:setup`) that launch tracked Claude Code work, manage lifecycle and ownership, and surface results back into Codex.
 
@@ -43,24 +48,26 @@ It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex
 
 ### 1. Install
 
-Install from the Sendbird marketplace:
+Add this repository as a Codex marketplace and install its `cc` plugin:
 
 ```bash
-codex plugin marketplace add sendbird/codex-marketplace
-codex plugin add cc@sendbird
+codex plugin marketplace add MerouaneBen/cc-plugin-codex --ref main
+codex plugin add cc@merouane
 ```
 
-Then install `cc` from the Sendbird marketplace inside Codex, and run `$cc:setup` once.
+Start a new Codex task and run `$cc:setup` once.
 
 `cc-plugin-codex` uses Codex native plugin hooks. The active plugin copy lives under Codex's plugin cache, and hook commands resolve through `$PLUGIN_ROOT`; there is no separate local checkout install.
 
-The optional `npx` helper runs the same marketplace/cache install path and enables the required Codex feature gates:
+The repository installer runs the same marketplace/cache path and enables the required Codex feature gates:
 
 ```bash
-npx cc-plugin-codex install
+git clone https://github.com/MerouaneBen/cc-plugin-codex.git
+cd cc-plugin-codex
+node scripts/installer-cli.mjs install
 ```
 
-On Windows, prefer the Sendbird marketplace path or the `npx` helper. The shell-script helper below is POSIX-only.
+On Windows, prefer the marketplace path or the Node installer. The shell-script helper below is POSIX-only.
 Codex CLI's official guidance still treats Windows support as experimental and recommends a WSL workspace for the best Codex experience. Claude Code supports both native Windows and WSL.
 
 > **Prerequisites:** Node.js 18+, Codex with hook support, and `claude` CLI installed and authenticated.
@@ -216,6 +223,10 @@ claude --resume <session-id>
 $cc:cancel task-abc123              # cancel a running job
 ```
 
+Cancellation is idempotent for an explicit job ID. Repeating the command
+reports the persisted terminal status without changing it. Cancelling a queued
+job also releases its pending routing markers.
+
 ### `$cc:setup`
 
 ```text
@@ -233,11 +244,12 @@ All review and rescue commands support `--background`. Background jobs are track
 
 1. **Queued → Running → Completed** — jobs progress through states automatically.
 2. **Built-in subagent background flows** — background rescue, review, and adversarial review use Codex-managed subagent turns rather than stuffing `--background` into the companion command itself.
-3. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
+3. **Fail-closed launch tracking** — the reservation appears immediately as a queued job, but Codex reports only that forwarding is queued and launch is not yet verified. The child records `routingState: launched` plus a launch receipt when the companion really starts; missing launchers, missing agent ids, and bounded launch timeouts become stored failed jobs instead of optimistic success messages.
+4. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
    The nudge is intentionally just a pointer. The actual stored result still opens through `$cc:result`.
-4. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
-5. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
-6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
+5. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
+6. **Session ownership** — jobs stay attached to the user-facing parent Codex session even when a built-in rescue/review child does the actual work, so plain `$cc:status`, `$cc:result`, and resume-candidate detection still follow the parent thread.
+7. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
 
 **Typical background flow:**
 
@@ -250,7 +262,7 @@ $cc:result task-abc123
 
 ### What “background” means here
 
-- The parent Codex thread does not wait.
+- The parent Codex thread does not wait for task completion and does not claim immediate launch success. Use `$cc:status <job-id>` to distinguish queued forwarding, a launched companion job, and a failed launch.
 - The Claude companion command still runs in the foreground inside its own worker/subagent thread.
 - For rescue and background review flows, the plugin prefers Codex built-in subagents and only uses job polling/status commands as the durable backstop.
 
@@ -294,15 +306,16 @@ The review gate is an **optional turn-end hook**. When enabled, Codex runs a Cla
 
 ## Install Variants
 
-### Sendbird marketplace (preferred)
+### Personal GitHub marketplace (preferred)
 
 Add the marketplace:
 
 ```bash
-codex marketplace add sendbird/codex-marketplace
+codex plugin marketplace add MerouaneBen/cc-plugin-codex --ref main
+codex plugin add cc@merouane
 ```
 
-Then install `cc` from the Sendbird marketplace inside Codex, and run:
+Start a new Codex task and run:
 
 ```text
 $cc:setup
@@ -310,10 +323,12 @@ $cc:setup
 
 Marketplace/plugin install places the plugin under Codex's plugin cache. `$cc:setup` verifies Claude Code, confirms `[features].hooks = true` plus `[features].plugin_hooks = true`, and trusts the current `hooks/hooks.json` hook hashes from the active plugin cache.
 
-### npx helper
+### Repository installer
 
 ```bash
-npx cc-plugin-codex install
+git clone https://github.com/MerouaneBen/cc-plugin-codex.git
+cd cc-plugin-codex
+node scripts/installer-cli.mjs install
 ```
 
 After install, run:
@@ -322,12 +337,14 @@ After install, run:
 $cc:setup
 ```
 
-The helper adds the Sendbird marketplace, installs `cc` through Codex app-server, enables native hook feature gates, and removes stale global hook entries from older installs.
+The helper adds this fork's marketplace, installs `cc` through Codex app-server,
+enables native hook feature gates, and removes stale global hook entries from
+older installs.
 
 ### Shell script (POSIX-only)
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/install.sh" | bash
+curl -fsSL "https://raw.githubusercontent.com/MerouaneBen/cc-plugin-codex/main/scripts/install.sh" | bash
 ```
 
 After install, run:
@@ -338,17 +355,22 @@ $cc:setup
 
 ### Update
 
-Re-run the marketplace update/install flow or the `npx` helper — both are idempotent.
+Refresh the marketplace snapshot, reinstall the plugin, then start a new Codex task:
 
 ```bash
-npx cc-plugin-codex update
+codex plugin marketplace upgrade merouane
+codex plugin add cc@merouane
 ```
 
 ### Uninstall
 
 ```bash
-npx cc-plugin-codex uninstall
+codex plugin remove cc@merouane
+codex plugin marketplace remove merouane
 ```
+
+For project-level operating rules, a real review workflow, maintenance, and
+rollback instructions, see [Personal usage](docs/PERSONAL-USAGE.md).
 
 ## Troubleshooting
 

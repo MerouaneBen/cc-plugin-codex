@@ -317,6 +317,8 @@ export function renderJobStatusReport(job) {
   pushKeyValueTableRow(lines, "Kind", job.kindLabel ?? job.kind ?? "");
   pushKeyValueTableRow(lines, "Title", job.title ?? "");
   pushKeyValueTableRow(lines, "Status", job.status ?? "unknown");
+  pushKeyValueTableRow(lines, "Routing state", job.routingState ?? "");
+  pushKeyValueTableRow(lines, "Launch receipt", job.launchReceipt ?? "");
   pushKeyValueTableRow(lines, "Phase", job.phase ?? "");
   pushKeyValueTableRow(lines, "Summary", job.summary ?? "");
   pushKeyValueTableRow(lines, "Started", job.startedAt ?? "");
@@ -386,7 +388,12 @@ export function renderStoredJobResult(job, storedJob) {
 }
 
 export function renderCancelReport(job) {
-  const lines = ["# Claude Code Cancel", "", `Cancelled ${job.id}.`, ""];
+  const outcome = job.status === "cancel_failed"
+    ? `Cancellation failed for ${job.id}.`
+    : job.status && job.status !== "cancelled"
+      ? `Cancellation ended with status ${job.status} for ${job.id}.`
+      : `Cancelled ${job.id}.`;
+  const lines = ["# Claude Code Cancel", "", outcome, ""];
   if (job.title) lines.push(`- Title: ${job.title}`);
   if (job.summary) lines.push(`- Summary: ${job.summary}`);
   if (job.status === "cancel_failed") lines.push(`- Warning: Process group may still be alive. Manual cleanup: kill -9 -${job.pgid ?? job.pid}`);

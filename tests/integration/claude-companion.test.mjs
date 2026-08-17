@@ -1653,6 +1653,430 @@ describe("claude-companion integration", () => {
       assert.equal(payload.ownerSessionId, "env-session");
       assert.equal(payload.parentThreadId, "thread-123");
       assert.match(payload.jobId, /^review-/);
+      assert.ok(fs.existsSync(reservationPathFor(testEnv, payload.jobId)));
+      const queuedJob = readStoredJobById(testEnv, payload.jobId);
+      assert.equal(queuedJob.status, "queued");
+      assert.equal(queuedJob.routingState, "reserved");
+      assert.match(queuedJob.launchDeadlineAt, /^\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("cancels a reserved background review idempotently and releases its routing marker", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const reservationPath = reservationPathFor(testEnv, routing.jobId);
+      assert.equal(fs.existsSync(reservationPath), true);
+
+      const firstCancel = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json", routing.jobId],
+        { env: testEnv.env },
+      );
+      assert.equal(firstCancel.status, "cancelled");
+
+      const cancelledJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(cancelledJob.status, "cancelled");
+      assert.equal(cancelledJob.phase, "cancelled");
+      assert.equal(cancelledJob.routingState, "cancelled");
+      assert.equal(cancelledJob.launchDeadlineAt, null);
+      assert.equal(fs.existsSync(reservationPath), false);
+      assert.equal(
+        fs.existsSync(path.join(stateDirFor(testEnv), "jobs", `${routing.jobId}.claim`)),
+        false,
+      );
+
+      const secondCancel = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json", routing.jobId],
+        { env: testEnv.env },
+      );
+      assert.equal(secondCancel.status, "cancelled");
+      assert.equal(readStoredJobById(testEnv, routing.jobId).completedAt, cancelledJob.completedAt);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("persists cancel_failed as a terminal idempotent state", () => {
+    const testEnv = createTestEnvironment();
+    const jobId = "cancel-missing-pid-identity";
+
+    try {
+      writeSessionScopedJob(testEnv, jobId, {
+        id: jobId,
+        status: "running",
+        phase: "running",
+        routingState: "launched",
+        pid: 999999,
+        pidIdentity: null,
+        createdAt: new Date().toISOString(),
+      });
+
+      const firstCancel = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env },
+      );
+      assert.equal(firstCancel.status, "cancel_failed");
+
+      const failedJob = readStoredJobById(testEnv, jobId);
+      assert.equal(failedJob.status, "cancel_failed");
+      assert.equal(failedJob.phase, "cancel_failed");
+      assert.equal(failedJob.routingState, "launched");
+      assert.equal(failedJob.pid, 999999);
+      assert.equal(failedJob.pgid, 999999);
+
+      const secondCancel = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json", jobId],
+        { env: testEnv.env },
+      );
+      assert.equal(secondCancel.status, "cancel_failed");
+      assert.equal(readStoredJobById(testEnv, jobId).completedAt, failedJob.completedAt);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("lets concurrent duplicate cancel commands converge on one terminal state", async () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "duplicate-cancel delay=3000",
+        ],
+        { env: testEnv.env }
+      );
+      await waitForJobState(
+        testEnv,
+        launch.jobId,
+        testEnv.env,
+        (payload) =>
+          payload.state === "active" &&
+          payload.job.status === "running" &&
+          Number.isFinite(payload.job.pid) &&
+          Boolean(payload.job.pidIdentity),
+        "running job before duplicate cancellation"
+      );
+
+      const attempts = await Promise.all([
+        runCompanionAsyncJson(
+          ["cancel", "--cwd", testEnv.workspaceDir, "--json", launch.jobId],
+          { env: testEnv.env }
+        ),
+        runCompanionAsyncJson(
+          ["cancel", "--cwd", testEnv.workspaceDir, "--json", launch.jobId],
+          { env: testEnv.env }
+        ),
+      ]);
+
+      assert.ok(attempts.some((payload) => payload.status === "cancelled"));
+      for (const payload of attempts) {
+        assert.ok(
+          payload.status === "cancelling" || payload.status === "cancelled",
+          `Unexpected concurrent cancel status: ${payload.status}`
+        );
+      }
+
+      const terminal = await waitForTerminalResult(testEnv, launch.jobId, testEnv.env);
+      assert.equal(terminal.job.status, "cancelled");
+      assert.equal(terminal.storedJob.phase, "cancelled");
+      assert.equal(terminal.storedJob.pid, null);
+      assert.equal(terminal.storedJob.pidIdentity, null);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("cancels the only active job without requiring its id", async () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "implicit-cancel delay=3000",
+        ],
+        { env: testEnv.env }
+      );
+      await waitForJobState(
+        testEnv,
+        launch.jobId,
+        testEnv.env,
+        (payload) => payload.state === "active" && payload.job.status === "running",
+        "single running job before implicit cancellation"
+      );
+
+      const cancelled = runCompanionJson(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+      assert.equal(cancelled.jobId, launch.jobId);
+      assert.equal(
+        cancelled.status,
+        "cancelled",
+        `Unexpected implicit cancel payload: ${JSON.stringify(cancelled)}; stored: ${JSON.stringify(readStoredJobById(testEnv, launch.jobId))}`
+      );
+
+      const terminal = await waitForTerminalResult(testEnv, launch.jobId, testEnv.env);
+      assert.equal(terminal.job.status, "cancelled");
+      assert.equal(terminal.storedJob.phase, "cancelled");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("fails clearly when cancel without an id is ambiguous and leaves both jobs active", async () => {
+    const testEnv = createTestEnvironment();
+    let launches = [];
+
+    try {
+      launches = await Promise.all(
+        ["ambiguous-a delay=3000", "ambiguous-b delay=3000"].map((prompt) =>
+          runCompanionAsyncJson(
+            [
+              "task",
+              "--cwd",
+              testEnv.workspaceDir,
+              "--background",
+              "--json",
+              prompt,
+            ],
+            { env: testEnv.env }
+          )
+        )
+      );
+      await Promise.all(
+        launches.map((launch) =>
+          waitForJobState(
+            testEnv,
+            launch.jobId,
+            testEnv.env,
+            (payload) => payload.state === "active" && payload.job.status === "running",
+            "running job before ambiguous cancellation"
+          )
+        )
+      );
+
+      const ambiguous = runCompanionExpectFailure(
+        ["cancel", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+      assert.match(ambiguous.stderr, /Multiple Claude Code jobs are active/i);
+      assert.match(ambiguous.stderr, /Pass a job id to \$cc:cancel/i);
+
+      for (const launch of launches) {
+        const active = runCompanionJson(
+          ["status", "--cwd", testEnv.workspaceDir, "--json", launch.jobId],
+          { env: testEnv.env }
+        );
+        assert.equal(active.job.status, "running");
+      }
+    } finally {
+      await Promise.allSettled(
+        launches.map((launch) =>
+          runCompanionAsyncJson(
+            ["cancel", "--cwd", testEnv.workspaceDir, "--json", launch.jobId],
+            { env: testEnv.env }
+          )
+        )
+      );
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("records a failed job when the parent cannot spawn a forwarding agent", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const aborted = runCompanionJson(
+        [
+          "background-launch-abort",
+          "--job-id",
+          routing.jobId,
+          "--reason",
+          "spawn-agent-unavailable",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.equal(aborted.ok, false);
+      assert.equal(aborted.job.id, routing.jobId);
+      assert.equal(aborted.job.status, "failed");
+      assert.equal(aborted.job.routingState, "failed");
+      assert.equal(aborted.job.routingFailureReason, "spawn-agent-unavailable");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+
+      const status = runCompanionJson(
+        ["status", routing.jobId, "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.equal(status.job.status, "failed");
+      const result = runCompanionJson(
+        ["result", routing.jobId, "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.equal(result.state, "terminal");
+      assert.match(result.storedJob.errorMessage, /failed before Claude Code started/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("issues a launch receipt only after the forwarding child materializes the reserved job", async () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const childRun = runCompanionAsyncJson(
+        [
+          "review",
+          "--scope",
+          "working-tree",
+          "--model",
+          "haiku",
+          "--job-id",
+          routing.jobId,
+          "--cwd",
+          testEnv.workspaceDir,
+          "--view-state",
+          "defer",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+      const receipt = await runCompanionAsyncJson(
+        [
+          "background-launch-receipt",
+          "--job-id",
+          routing.jobId,
+          "--forwarding-agent-id",
+          "agent-test-123",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--timeout-ms",
+          "5000",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.equal(receipt.jobId, routing.jobId);
+      assert.equal(receipt.forwardingAgentId, "agent-test-123");
+      assert.match(receipt.launchReceipt, /^launch-[0-9a-f]{16}$/);
+      assert.ok(["running", "completed"].includes(receipt.status));
+
+      await childRun;
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.status, "completed");
+      assert.equal(storedJob.routingState, "launched");
+      assert.equal(storedJob.forwardingAgentId, "agent-test-123");
+      assert.equal(storedJob.launchReceipt, receipt.launchReceipt);
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("fails closed when a reserved background job never materializes", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const routing = runCompanionJson(
+        ["background-routing-context", "--kind", "review", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      const failedReceipt = runCompanionExpectFailure(
+        [
+          "background-launch-receipt",
+          "--job-id",
+          routing.jobId,
+          "--forwarding-agent-id",
+          "agent-never-started",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--timeout-ms",
+          "25",
+          "--poll-interval-ms",
+          "10",
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+
+      assert.match(failedReceipt.stderr, /did not materialize/i);
+      const storedJob = readStoredJobById(testEnv, routing.jobId);
+      assert.equal(storedJob.status, "failed");
+      assert.equal(storedJob.routingState, "failed");
+      assert.equal(storedJob.routingFailureReason, "launch-timeout");
+      assert.equal(storedJob.forwardingAgentId, "agent-never-started");
+      assert.equal(fs.existsSync(reservationPathFor(testEnv, routing.jobId)), false);
+
+      const lateChild = runCompanionExpectFailure(
+        [
+          "review",
+          "--scope",
+          "working-tree",
+          "--job-id",
+          routing.jobId,
+          "--cwd",
+          testEnv.workspaceDir,
+          "--json",
+        ],
+        { env: testEnv.env },
+      );
+      assert.match(lateChild.stderr, /already exists/i);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("includes queued jobs in the status active-job list", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      writeSessionScopedJob(testEnv, "review-queued-visible", {
+        id: "review-queued-visible",
+        kind: "review",
+        jobClass: "review",
+        title: "Queued review",
+        workspaceRoot: testEnv.workspaceDir,
+        status: "queued",
+        phase: "queued",
+        createdAt: new Date().toISOString(),
+      });
+      const status = runCompanionJson(
+        ["status", "--all", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env },
+      );
+      assert.ok(status.running.some((job) => job.id === "review-queued-visible"));
     } finally {
       cleanupTestEnvironment(testEnv);
     }
@@ -2663,8 +3087,19 @@ describe("claude-companion integration", () => {
         )
       );
 
+      await waitForJobState(
+        testEnv,
+        launches[0].jobId,
+        testEnv.env,
+        (payload) =>
+          payload.state === "active" &&
+          payload.job.status === "running" &&
+          Number.isFinite(payload.job.pid) &&
+          Boolean(payload.job.pidIdentity),
+        "running task with a verified process identity",
+      );
       await Promise.all(
-        launches.map((launch) =>
+        launches.slice(1).map((launch) =>
           waitForJobState(
             testEnv,
             launch.jobId,
@@ -2708,7 +3143,9 @@ describe("claude-companion integration", () => {
       ]);
 
       assert.equal(cancelledSnapshot.job.status, "cancelled");
+      assert.equal(cancelledSnapshot.job.phase, "cancelled");
       assert.equal(cancelledResult.job.status, "cancelled");
+      assert.equal(cancelledResult.storedJob.phase, "cancelled");
       assert.match(cancelledResult.storedJob.errorMessage, /Cancelled by user/);
       assertCompletedTaskPayload(siblingAResult, launches[1].prompt);
       assertCompletedTaskPayload(siblingBResult, launches[2].prompt);
@@ -2718,6 +3155,102 @@ describe("claude-companion integration", () => {
         { env: testEnv.env }
       );
       const snapshotIds = collectSnapshotJobIds(finalOverview);
+      for (const launch of launches) {
+        assert.ok(snapshotIds.includes(launch.jobId));
+      }
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("cancels several jobs concurrently under mixed background load without cross-job corruption", async () => {
+    const testEnv = createTestEnvironment();
+    const cancelPrompts = [
+      "stress-cancel-a delay=3000",
+      "stress-cancel-b delay=3000",
+      "stress-cancel-c delay=3000",
+    ];
+    const completionPrompts = [
+      "stress-finish-1 delay=550",
+      "stress-finish-2 delay=650",
+      "stress-finish-3 delay=750",
+      "stress-finish-4 delay=850",
+      "stress-finish-5 delay=950",
+    ];
+    const prompts = [...cancelPrompts, ...completionPrompts];
+
+    try {
+      const launches = await Promise.all(
+        prompts.map((prompt) =>
+          runCompanionAsyncJson(
+            [
+              "task",
+              "--cwd",
+              testEnv.workspaceDir,
+              "--background",
+              "--json",
+              prompt,
+            ],
+            { env: testEnv.env }
+          ).then((payload) => ({ ...payload, prompt }))
+        )
+      );
+      assert.equal(new Set(launches.map((launch) => launch.jobId)).size, launches.length);
+
+      const cancelTargets = launches.slice(0, cancelPrompts.length);
+      await Promise.all(
+        cancelTargets.map((launch) =>
+          waitForJobState(
+            testEnv,
+            launch.jobId,
+            testEnv.env,
+            (payload) =>
+              payload.state === "active" &&
+              payload.job.status === "running" &&
+              Number.isFinite(payload.job.pid) &&
+              Boolean(payload.job.pidIdentity),
+            "verified running job under mixed cancellation load"
+          )
+        )
+      );
+
+      const cancellations = await Promise.all(
+        cancelTargets.map((launch) =>
+          runCompanionAsyncJson(
+            ["cancel", "--cwd", testEnv.workspaceDir, "--json", launch.jobId],
+            { env: testEnv.env }
+          )
+        )
+      );
+      for (const cancellation of cancellations) {
+        assert.equal(cancellation.status, "cancelled");
+      }
+
+      const results = await Promise.all(
+        launches.map((launch) =>
+          waitForTerminalResult(testEnv, launch.jobId, testEnv.env).then((result) => ({
+            launch,
+            result,
+          }))
+        )
+      );
+
+      for (const { launch, result } of results.slice(0, cancelPrompts.length)) {
+        assert.equal(result.job.status, "cancelled", launch.jobId);
+        assert.equal(result.storedJob.phase, "cancelled", launch.jobId);
+        assert.equal(result.storedJob.pid, null, launch.jobId);
+        assert.equal(result.storedJob.pidIdentity, null, launch.jobId);
+      }
+      for (const { launch, result } of results.slice(cancelPrompts.length)) {
+        assertCompletedTaskPayload(result, launch.prompt);
+      }
+
+      const finalOverview = runCompanionJson(
+        ["status", "--cwd", testEnv.workspaceDir, "--json", "--all"],
+        { env: testEnv.env }
+      );
+      const snapshotIds = collectSnapshotJobIds(finalOverview);
+      assert.equal(snapshotIds.length, new Set(snapshotIds).size);
       for (const launch of launches) {
         assert.ok(snapshotIds.includes(launch.jobId));
       }

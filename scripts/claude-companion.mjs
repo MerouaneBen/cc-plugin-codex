@@ -81,8 +81,6 @@ import {
   getCurrentSessionMarker,
   listJobs,
   patchJob,
-  JOB_RESERVATION_SUFFIX,
-  resolveJobsDir,
   resolveJobLogFile,
   sanitizeId,
   setCurrentSession,
@@ -91,6 +89,13 @@ import {
   writeJobFile,
   cleanupOldJobs,
 } from "./lib/state.mjs";
+import {
+  abortBackgroundLaunch,
+  claimBackgroundJobId,
+  releaseBackgroundJobId,
+  reserveBackgroundJobId,
+  waitForBackgroundLaunchReceipt,
+} from "./lib/background-routing.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
@@ -145,6 +150,8 @@ function printUsage() {
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
+      "  node scripts/claude-companion.mjs background-launch-receipt --job-id <id> --forwarding-agent-id <id> [--cwd <path>] [--timeout-ms <ms>] [--json]",
+      "  node scripts/claude-companion.mjs background-launch-abort --job-id <id> --reason <code> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
       "  node scripts/claude-companion.mjs task-reserve-job [--json]",
       "  node scripts/claude-companion.mjs review-reserve-job [--json]"
@@ -179,11 +186,6 @@ function redactOutputReplacer(key, value) {
 // Normalization
 // ---------------------------------------------------------------------------
 
-function resolveReservedJobFile(workspaceRoot, jobId) {
-  const safeJobId = sanitizeId(jobId, "job ID");
-  return path.join(resolveJobsDir(workspaceRoot), `${safeJobId}${JOB_RESERVATION_SUFFIX}`);
-}
-
 function resolveExplicitJobId(value, workspaceRoot) {
   if (value == null || String(value).trim() === "") {
     return null;
@@ -193,14 +195,7 @@ function resolveExplicitJobId(value, workspaceRoot) {
     throw new Error(`Invalid job ID: ${explicitJobId}`);
   }
   const safeJobId = sanitizeId(explicitJobId, "job ID");
-  if (readStoredJob(workspaceRoot, safeJobId)) {
-    throw new Error(`Claude Code job id ${safeJobId} already exists.`);
-  }
-  if (!fs.existsSync(resolveReservedJobFile(workspaceRoot, safeJobId))) {
-    throw new Error(
-      `Claude Code job id ${safeJobId} is not reserved. Reserve one with the companion reserve-job helper before reusing it.`
-    );
-  }
+  claimBackgroundJobId(workspaceRoot, safeJobId);
   return safeJobId;
 }
 
@@ -282,7 +277,7 @@ async function withReleasedReservation(workspaceRoot, explicitJobId, fn) {
     return await fn();
   } finally {
     if (explicitJobId) {
-      releaseReservedJobId(workspaceRoot, explicitJobId);
+      releaseBackgroundJobId(workspaceRoot, explicitJobId);
     }
   }
 }
@@ -1124,36 +1119,6 @@ function createCompanionJob({
   );
 }
 
-function reserveUniqueJobId(workspaceRoot, prefix, label) {
-  const jobsDir = resolveJobsDir(workspaceRoot);
-  fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const candidate = generateJobId(prefix);
-    const reservationPath = resolveReservedJobFile(workspaceRoot, candidate);
-    try {
-      fs.writeFileSync(
-        reservationPath,
-        JSON.stringify({ jobId: candidate, reservedAt: nowIso() }, null, 2) + "\n",
-        { encoding: "utf8", flag: "wx" }
-      );
-    } catch (error) {
-      if (error?.code === "EEXIST") {
-        continue;
-      }
-      throw error;
-    }
-    return candidate;
-  }
-  throw new Error(`Failed to reserve a unique Claude Code ${label} job id.`);
-}
-
-function releaseReservedJobId(workspaceRoot, jobId) {
-  try {
-    fs.rmSync(resolveReservedJobFile(workspaceRoot, jobId), { force: true });
-  } catch {}
-}
-
-
 function createTrackedProgress(job, options = {}) {
   const logFile = createJobLogFile(job.workspaceRoot, job.id, job.title);
   return {
@@ -1533,7 +1498,6 @@ async function handleReviewCommand(argv, config) {
     base: options.base,
     scope: options.scope
   });
-  const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
@@ -1542,6 +1506,7 @@ async function handleReviewCommand(argv, config) {
 
   const requestedModel = resolveModel(options.model);
   const resolvedModel = resolveDefaultModel(requestedModel);
+  const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
 
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
@@ -1994,14 +1959,82 @@ function handleBackgroundRoutingContext(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace({ cwd });
+  const routingContext = buildSessionRoutingContext(cwd);
+  const reservation = reserveBackgroundJobId(workspaceRoot, {
+    prefix,
+    label: prefix,
+    kind,
+    ownerSessionId: routingContext.ownerSessionId,
+    parentThreadId: routingContext.parentThreadId,
+    materializePlaceholder: true,
+  });
   const payload = {
-    ...buildSessionRoutingContext(cwd),
-    jobId: reserveUniqueJobId(workspaceRoot, prefix, prefix),
+    ...routingContext,
+    jobId: reservation.jobId,
   };
   const rendered =
     `Job: ${payload.jobId}\n` +
     `Owner session: ${payload.ownerSessionId ?? "(none)"}\n` +
     `Parent thread: ${payload.parentThreadId ?? "(none)"}\n`;
+  outputCommandResult(payload, rendered, options.json);
+}
+
+async function handleBackgroundLaunchReceipt(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: [
+      "cwd",
+      "job-id",
+      "forwarding-agent-id",
+      "timeout-ms",
+      "poll-interval-ms",
+    ],
+    booleanOptions: ["json"],
+  });
+  if (!options["job-id"]) {
+    throw new Error("background-launch-receipt requires --job-id.");
+  }
+  if (!options["forwarding-agent-id"]) {
+    throw new Error("background-launch-receipt requires --forwarding-agent-id.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace({ cwd });
+  const payload = await waitForBackgroundLaunchReceipt(
+    workspaceRoot,
+    options["job-id"],
+    {
+      forwardingAgentId: options["forwarding-agent-id"],
+      timeoutMs: options["timeout-ms"],
+      pollIntervalMs: options["poll-interval-ms"],
+    },
+  );
+  const rendered =
+    `Launch receipt: ${payload.launchReceipt}\n` +
+    `Job: ${payload.jobId}\n` +
+    `Status: ${payload.status}\n`;
+  outputCommandResult(payload, rendered, options.json);
+}
+
+function handleBackgroundLaunchAbort(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "job-id", "reason", "forwarding-agent-id"],
+    booleanOptions: ["json"],
+  });
+  if (!options["job-id"]) {
+    throw new Error("background-launch-abort requires --job-id.");
+  }
+  if (!options.reason) {
+    throw new Error("background-launch-abort requires --reason.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace({ cwd });
+  const job = abortBackgroundLaunch(workspaceRoot, options["job-id"], {
+    reason: options.reason,
+    forwardingAgentId: options["forwarding-agent-id"] ?? null,
+  });
+  const payload = { ok: false, job };
+  const rendered = `${job.errorMessage}\nJob: ${job.id}\n`;
   outputCommandResult(payload, rendered, options.json);
 }
 
@@ -2013,9 +2046,12 @@ function handleReserveJob(argv, prefix) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace({ cwd });
-  const payload = {
-    jobId: reserveUniqueJobId(workspaceRoot, prefix, prefix),
-  };
+  const reservation = reserveBackgroundJobId(workspaceRoot, {
+    prefix,
+    label: prefix,
+    kind: prefix,
+  });
+  const payload = { jobId: reservation.jobId };
 
   outputResult(payload, options.json);
 }
@@ -2036,20 +2072,22 @@ async function handleCancel(argv) {
     workspaceRoot,
     job.id,
     ["running", "queued"],
-    "cancelling"
+    "cancelling",
+    { phase: "cancelling" },
   );
   if (!transition.transitioned) {
+    const currentStatus = transition.job?.status ?? job.status;
     outputCommandResult(
-      { jobId: job.id, status: job.status },
-      `Job ${job.id} is already ${job.status}.\n`,
+      { jobId: job.id, status: currentStatus },
+      `Job ${job.id} is already ${currentStatus}.\n`,
       options.json
     );
     return;
   }
 
   // Cancel via process group kill with PID identity verification
-  const pid = existing.pid ?? job.pid;
-  const pidIdentity = existing.pidIdentity ?? null;
+  const pid = transition.job?.pid ?? existing.pid ?? job.pid;
+  const pidIdentity = transition.job?.pidIdentity ?? existing.pidIdentity ?? null;
   /** @type {{ cancelled: boolean, note?: string }} */
   let cancelResult = { cancelled: true, note: "No PID to cancel" };
   const jobLogFile = resolveJobLogFile(workspaceRoot, job.id);
@@ -2074,38 +2112,51 @@ async function handleCancel(argv) {
   // Determine final status based on actual cancellation result
   const completedAt = nowIso();
   const finalStatus = cancelResult.cancelled ? "cancelled" : "cancel_failed";
+  const routingWasPending = ["reserved", "claimed"].includes(
+    transition.job?.routingState,
+  );
+  const terminalRoutingData = {
+    launchDeadlineAt: null,
+    ...(routingWasPending ? { routingState: "cancelled" } : {}),
+  };
 
   // CAS: cancelling → cancelled/cancel_failed
+  let terminalTransition;
   if (finalStatus === "cancelled") {
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancelled", {
+    terminalTransition = transitionJob(workspaceRoot, job.id, ["cancelling"], "cancelled", {
       completedAt,
+      phase: "cancelled",
       errorMessage: "Cancelled by user.",
       pid: null,
       pidIdentity: null,
+      ...terminalRoutingData,
     });
   } else {
     // cancel_failed: PRESERVE PID/PGID for manual cleanup
-    transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
+    terminalTransition = transitionJob(workspaceRoot, job.id, ["cancelling"], "cancel_failed", {
       completedAt,
+      phase: "cancel_failed",
       errorMessage: `Cancel failed: ${cancelResult.note ?? "process group still alive"}`,
       note: cancelResult.note ?? null,
       pgid: pid, // Preserve for manual kill hint
       // Keep pid/pidIdentity for recovery
+      ...terminalRoutingData,
     });
   }
 
-  appendLogLine(jobLogFile, `Cancel result: ${finalStatus}`);
+  releaseBackgroundJobId(workspaceRoot, job.id);
+  const terminalJob = terminalTransition.job ?? readStoredJob(workspaceRoot, job.id) ?? job;
+  appendLogLine(jobLogFile, `Cancel result: ${terminalJob.status}`);
   cleanupOldJobs(workspaceRoot);
 
-  const nextJob = { ...job, status: finalStatus, phase: finalStatus };
   const payload = {
     jobId: job.id,
-    status: finalStatus,
-    title: job.title,
+    status: terminalJob.status,
+    title: terminalJob.title,
     note: cancelResult.note,
   };
 
-  outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  outputCommandResult(payload, renderCancelReport(terminalJob), options.json);
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,6 +2200,12 @@ async function main() {
       break;
     case "background-routing-context":
       handleBackgroundRoutingContext(argv);
+      break;
+    case "background-launch-receipt":
+      await handleBackgroundLaunchReceipt(argv);
+      break;
+    case "background-launch-abort":
+      handleBackgroundLaunchAbort(argv);
       break;
     case "task-resume-candidate":
       handleTaskResumeCandidate(argv);

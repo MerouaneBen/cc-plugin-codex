@@ -128,6 +128,11 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(reviewRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(reviewRuntime, /do not silently drop the completion notification path when the parent provided a non-empty parent thread id/i);
   assert.match(reviewRuntime, /Use that same steering message as the child's own final assistant message for background mode/i);
+  assert.match(reviewRuntime, /Require a non-empty forwarding-agent id from the actual `spawn_agent` tool result/i);
+  assert.match(reviewRuntime, /run `background-launch-abort`/i);
+  assert.match(reviewRuntime, /report only that forwarding is queued and launch is not yet verified/i);
+  assert.match(reviewRuntime, /child records routing state `launched` and a non-empty launch receipt/i);
+  assert.match(reviewRuntime, /`\$cc:status <job-id>` is the durable authority/i);
 
   assert.match(rescueRuntime, /resolved the active plugin root/i);
   assert.match(rescueRuntime, activeRootPattern);
@@ -146,6 +151,11 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(rescueRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(rescueRuntime, /Use steering messages that point the parent at `\$cc:result` or `\$cc:status` instead of embedding the raw Claude result/i);
   assert.match(rescueRuntime, /use that same steering message as the child's own final assistant message instead of echoing the raw companion result/i);
+  assert.match(rescueRuntime, /forwarding-agent id from the actual `spawn_agent` tool result/i);
+  assert.match(rescueRuntime, /reports only that forwarding is queued and launch is not yet verified/i);
+  assert.match(rescueRuntime, /child marks the reserved job `launched` and writes a non-empty launch receipt/i);
+  assert.match(rescueRuntime, /`\$cc:status <job-id>` is the durable authority/i);
+  assert.match(rescueRuntime, /records the reserved job with `background-launch-abort`/i);
 });
 
 test("review skills keep background execution outside the companion command", () => {
@@ -206,7 +216,12 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /do not embed the raw Claude result inside the notification message/i);
   assert.match(review, /do not include any other prose in that notification message/i);
   assert.match(review, /use that same steering message as the child's own final assistant message instead of echoing the raw review result/i);
-  assert.match(review, /Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\./i);
+  assert.match(review, /background-launch-abort --job-id <reserved-job-id> --reason spawn-agent-unavailable/i);
+  assert.match(review, /Require an actual `spawn_agent` tool call and a non-empty agent id/i);
+  assert.match(review, /reserved job is immediately visible as `queued`/i);
+  assert.match(review, /routingState` to `launched` and stores a non-empty `launchReceipt`/i);
+  assert.match(review, /Only status `running` or `completed` together with routing state `launched` and a non-empty launch receipt proves/i);
+  assert.match(review, /Claude Code review forwarding is queued as <job-id>; launch is not yet verified\. Check \$cc:status <job-id>\./i);
   assert.doesNotMatch(review, /claude-companion\.mjs" review --background/i);
   assert.doesNotMatch(review, /claude-companion\.mjs" review \$ARGUMENTS/i);
 
@@ -263,7 +278,12 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /do not embed the raw Claude result inside the notification message/i);
   assert.match(adversarial, /do not include any other prose in that notification message/i);
   assert.match(adversarial, /use that same steering message as the child's own final assistant message instead of echoing the raw review result/i);
-  assert.match(adversarial, /Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\./i);
+  assert.match(adversarial, /background-launch-abort --job-id <reserved-job-id> --reason spawn-agent-unavailable/i);
+  assert.match(adversarial, /Require an actual `spawn_agent` tool call and a non-empty agent id/i);
+  assert.match(adversarial, /reserved job is immediately visible as `queued`/i);
+  assert.match(adversarial, /routingState` to `launched` and stores a non-empty `launchReceipt`/i);
+  assert.match(adversarial, /Only status `running` or `completed` together with routing state `launched` and a non-empty launch receipt proves/i);
+  assert.match(adversarial, /Claude Code adversarial review forwarding is queued as <job-id>; launch is not yet verified\. Check \$cc:status <job-id>\./i);
   assert.doesNotMatch(adversarial, /claude-companion\.mjs" adversarial-review --background/i);
   assert.doesNotMatch(adversarial, /claude-companion\.mjs" adversarial-review \$ARGUMENTS/i);
 });
@@ -294,9 +314,14 @@ test("rescue skill keeps --background and --wait as host-side controls only", ()
   assert.match(rescue, /internal `--job-id <reserved-job-id>` routing flag/i);
   assert.match(rescue, /Foreground rescue must add `--view-state on-success`/i);
   assert.match(rescue, /Background rescue must add `--view-state defer`/i);
-  assert.match(rescue, /Background: spawn the rescue subagent without waiting for it in this turn/i);
+  assert.match(rescue, /Background: spawn the rescue subagent and do not wait for task completion or claim immediate launch success/i);
   assert.match(rescue, /The subagent still runs the companion `task` command in the foreground/i);
-  assert.match(rescue, /tell the user `Claude Code rescue started in the background\. Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\.`/i);
+  assert.match(rescue, /background-launch-abort --job-id <reserved-job-id> --reason spawn-agent-unavailable/i);
+  assert.match(rescue, /require an actual `spawn_agent` tool call and a non-empty agent id/i);
+  assert.match(rescue, /reserved job is immediately visible as `queued`/i);
+  assert.match(rescue, /routingState` to `launched` and stores a non-empty `launchReceipt`/i);
+  assert.match(rescue, /Only status `running` or `completed` together with routing state `launched` and a non-empty launch receipt proves/i);
+  assert.match(rescue, /Claude Code rescue forwarding is queued as <job-id>; launch is not yet verified\. Check \$cc:status <job-id>\./i);
 });
 
 test("rescue skill documents the experimental built-in-agent forwarding path", () => {
@@ -451,6 +476,13 @@ test("simple runtime skills resolve the active plugin root from the skill path",
     assert.match(skillText, activeRootPattern);
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
   }
+});
+
+test("cancel documents idempotent explicit-job retries", () => {
+  const cancel = read("skills/cancel/SKILL.md");
+
+  assert.match(cancel, /same explicit job ID is idempotent/i);
+  assert.match(cancel, /persisted terminal status without changing it/i);
 });
 
 test("review skills never hard-require a question tool the thread may not have", () => {

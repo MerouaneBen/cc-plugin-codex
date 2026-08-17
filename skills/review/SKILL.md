@@ -82,6 +82,13 @@ Background flow:
   - `fork_context: false`
   - `reasoning_effort: "medium"`
   - no `agent_type` and no `model`, so the child uses the built-in default agent and inherits the parent model. Never pin a specific Codex model name here; the available catalog is owned by the host CLI and changes between releases.
+- Require an actual `spawn_agent` tool call and a non-empty agent id. Assistant intent or prose is not evidence that the forwarding child was accepted.
+- If `spawn_agent` is unavailable, do not claim that the review started. Materialize the reserved job as failed by running:
+  `node "<plugin-root>/scripts/claude-companion.mjs" background-launch-abort --job-id <reserved-job-id> --reason spawn-agent-unavailable --cwd <workspace-root> --json`
+- If the tool call fails, use reason `spawn-agent-failed`; if it returns no agent id, use reason `spawn-agent-no-id`. Surface that failure and stop.
+- A successful asynchronous `spawn_agent` ends the parent turn before the child necessarily materializes the companion job. Do not call the review started from the tool result alone.
+- The reserved job is immediately visible as `queued`. The child changes `routingState` to `launched` and stores a non-empty `launchReceipt` when the companion command really starts. An unmaterialized reservation becomes `failed` with `launch-timeout` after the bounded launch deadline.
+- Treat `$cc:status <reserved-job-id>` as the durable authority. Only status `running` or `completed` together with routing state `launched` and a non-empty launch receipt proves that Claude Code started.
 - Prefer a self-contained child message over inheriting parent history. The built-in review child should not rely on full parent thread replay for normal operation.
 - Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
 - Before spawning the built-in child, emit one short commentary update that clearly says the parent is starting the built-in review child on the inherited model at `medium` effort.
@@ -114,6 +121,6 @@ Background flow:
   - do not embed the raw Claude result inside the notification message
   - do not include any other prose in that notification message
   - use that same steering message as the child's own final assistant message instead of echoing the raw review result
-- Do not wait for completion in this turn.
-- After launching, tell the user: `Claude Code review started in the background. Check the subagent session or $cc:status for progress, and once it's done, we will let you know to see the results.`
+- Do not wait for review completion or claim immediate launch success in this turn.
+- After `spawn_agent` accepts the child, tell the user: `Claude Code review forwarding is queued as <job-id>; launch is not yet verified. Check $cc:status <job-id>.`
 - Do not fix anything mentioned in the review output.

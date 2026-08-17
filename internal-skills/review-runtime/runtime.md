@@ -24,6 +24,10 @@ Foreground contract:
 
 Background contract:
 - Use `background-routing-context --kind review --json` before spawning the forwarding child.
+- Require a non-empty forwarding-agent id from the actual `spawn_agent` tool result. Assistant intent or prose is not evidence that the child was accepted.
+- If `spawn_agent` is unavailable or fails, run `background-launch-abort` for the reserved job and do not use success language.
+- After `spawn_agent` accepts the child, report only that forwarding is queued and launch is not yet verified. An asynchronous spawn ends the parent turn before materialization can be confirmed reliably.
+- The reserved job is visible as `queued`; the child records routing state `launched` and a non-empty launch receipt when the companion command starts. `$cc:status <job-id>` is the durable authority, and an unmaterialized reservation becomes `failed` after the bounded deadline.
 - Preserve `--job-id` only when reserved by the parent helper.
 - Whenever preserving that reserved `--job-id`, also pass `--cwd <workspace-root>` using `workspaceRoot` from the same helper response. Reserved job ids are workspace-scoped.
 - Preserve `--owner-session-id` only when the parent helper returned a non-empty owner session id.

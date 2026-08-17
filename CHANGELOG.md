@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+## v1.4.3
+
+- Make Codex-managed background launches fail closed. Review, adversarial-review, and rescue now expose a queued reservation immediately, avoid claiming that an asynchronous `spawn_agent` started Claude, and require the child to materialize a companion-issued launch receipt before status can prove launch. Missing launchers, missing agent ids, and bounded materialization timeouts become stored failed jobs; claimed reservation markers prevent duplicate forwarding children, queued jobs remain visible in `$cc:status`, and late children cannot overwrite a launch failure.
+- Make cancellation terminal, idempotent, and race-safe. Queued reservations release routing markers, active processes retain PID identity protection, failed cancellation preserves recovery metadata, interrupted cancellations are reaped to a truthful terminal state, and late progress events can no longer overwrite cancelled job fields. Terminal presentation normalizes stale phases to the stored terminal status, while unexpected persistence and recovery errors are recorded in the job log instead of disappearing silently. Test processes now use isolated Codex state roots so a review that runs the suite cannot delete its own live job state.
+- Turn this fork into a self-contained personal Codex marketplace at `MerouaneBen/cc-plugin-codex`, update installer defaults and project metadata to the maintained fork, and document installation, project adoption, upgrades, rollback, and a production-style review workflow.
+
 ## v1.4.2
 
 - Refuse companion delegation from Codex threads that are themselves driven by Claude Code. The reverse-direction plugin (Claude Code → Codex) spawns a bare `codex app-server` that inherits `~/.codex`, so its headless review threads see this plugin's skills and delegated the review back to Claude Code — looping the work between the two assistants and burning minutes on `wait`-tool spins with narration in place of findings. Session hooks now stamp `hostOrigin: "claude-code"` on the current-session marker when Claude Code host env markers (`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`) reach them, and `review`, `adversarial-review`, and `task` refuse delegation from such threads with explicit instructions to perform the work directly in that thread. Interactive sessions (env session id present), background forwarding children owned by a different session, and unstamped state all stay open, so the gate fails open everywhere the loop cannot occur.
