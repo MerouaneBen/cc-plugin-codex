@@ -1,6 +1,6 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "Personally maintained Claude Code Plugin for Codex, based on Sendbird's Apache-2.0 project",
   "type": "module",
   "author": {

@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   createReviewIsolation,
   createReviewWorktree,
+  isLinkedGitWorktree,
   pruneStaleReviewWorktrees,
   resolveBaseRef,
 } from "../scripts/lib/review-worktree.mjs";
@@ -191,6 +192,35 @@ describe("createReviewIsolation", () => {
       assert.equal(fs.existsSync(iso.cwd), false);
     }
   });
+
+  it("uses a self-contained clone for branch review from a linked worktree", () => {
+    const linkedRoot = path.join(tempHome, "linked-review-source");
+    git(repoRoot, ["worktree", "add", "--detach", linkedRoot, "HEAD"]);
+    try {
+      assert.equal(isLinkedGitWorktree(linkedRoot), true);
+      const registeredBefore = git(repoRoot, ["worktree", "list", "--porcelain"]).stdout;
+      const iso = createReviewIsolation(linkedRoot, { mode: "branch" }, {
+        label: "iso-linked",
+      });
+      try {
+        assert.notEqual(iso.cwd, linkedRoot);
+        assert.equal(iso.gitRoot, iso.cwd);
+        assert.equal(iso.isolated, true);
+        assert.equal(iso.strategy, "clone");
+        assert.ok(fs.existsSync(path.join(iso.cwd, "file.txt")));
+        assert.equal(
+          git(repoRoot, ["worktree", "list", "--porcelain"]).stdout,
+          registeredBefore,
+          "clone isolation must not write a new registration into the shared git dir",
+        );
+      } finally {
+        iso.cleanup();
+        assert.equal(fs.existsSync(iso.cwd), false);
+      }
+    } finally {
+      git(repoRoot, ["worktree", "remove", "--force", linkedRoot]);
+    }
+  });
 });
 
 describe("pruneStaleReviewWorktrees", () => {
@@ -212,6 +242,29 @@ describe("pruneStaleReviewWorktrees", () => {
       assert.ok(fs.existsSync(wt.path));
     } finally {
       wt.cleanup();
+    }
+  });
+
+  it("removes stale clone isolation without changing source worktree registrations", () => {
+    const linkedRoot = path.join(tempHome, "linked-stale-source");
+    git(repoRoot, ["worktree", "add", "--detach", linkedRoot, "HEAD"]);
+    try {
+      const registeredBefore = git(repoRoot, ["worktree", "list", "--porcelain"]).stdout;
+      const iso = createReviewIsolation(linkedRoot, { mode: "branch" }, {
+        label: "stale-clone",
+      });
+      const oldTime = (Date.now() - 7 * 60 * 60 * 1000) / 1000;
+      fs.utimesSync(iso.cwd, oldTime, oldTime);
+
+      pruneStaleReviewWorktrees(linkedRoot, { maxAgeMs: 6 * 60 * 60 * 1000 });
+
+      assert.equal(fs.existsSync(iso.cwd), false);
+      assert.equal(
+        git(repoRoot, ["worktree", "list", "--porcelain"]).stdout,
+        registeredBefore,
+      );
+    } finally {
+      git(repoRoot, ["worktree", "remove", "--force", linkedRoot]);
     }
   });
 });
